@@ -84,7 +84,7 @@ async def full_search(
         result = await pipeline.run_pipeline(db, request.query)
         return FullSearchResponse(**result)
     except Exception as e:
-        logger.error(f"Search API Error (Full Pipeline): {str(e)}")
+        logger.exception(f"Search API Error (Full Pipeline): {str(e)}", exc_info=e)
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/json", response_model=SearchResponse)
@@ -99,7 +99,7 @@ async def generate_json(
             structured_json=structured_query.model_dump()
         )
     except Exception as e:
-        logger.error(f"Search API Error: {str(e)}")
+        logger.exception(f"Search API Error: {str(e)}", exc_info=e)
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/sql", response_model=SQLResponse)
@@ -115,7 +115,7 @@ async def generate_sql(
             parameters=parameters
         )
     except Exception as e:
-        logger.error(f"Search API Error (SQL Gen): {str(e)}")
+        logger.exception(f"Search API Error (SQL Gen): {str(e)}", exc_info=e)
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/execute", response_model=ExecuteResponse)
@@ -128,8 +128,8 @@ async def execute_sql(
         result = await service.execute_query(db, request.sql, request.parameters)
         return ExecuteResponse(**result)
     except ValueError as ve:
-        logger.error(f"Search API Error (SQL Execute Security): {str(ve)}")
+        logger.exception(f"Search API Error (SQL Execute Security): {str(ve)}", exc_info=ve)
         raise HTTPException(status_code=403, detail=str(ve))
     except Exception as e:
-        logger.error(f"Search API Error (SQL Execute): {str(e)}")
+        logger.exception(f"Search API Error (SQL Execute): {str(e)}", exc_info=e)
         raise HTTPException(status_code=400, detail=str(e))

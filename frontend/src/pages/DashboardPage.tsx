@@ -14,7 +14,10 @@ import {
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { historyApi } from "@/services/history.service";
+import { llmSettingsApi } from "@/services/llm-settings.service";
 import { useAppStore } from "@/store/appStore";
+import type { AnyProvider } from "@/store/appStore";
+import { PROVIDER_INFO } from "@/config/providers";
 import { formatDate, formatMs } from "@/lib/utils";
 
 const container = {
@@ -33,6 +36,7 @@ const item = {
 export default function DashboardPage() {
   const navigate = useNavigate();
   const savedQueries = useAppStore((s) => s.savedQueries);
+  const llmSettings = useAppStore((s) => s.llmSettings);
 
   const { data: historyData, isLoading } = useQuery({
     queryKey: ["history"],
@@ -40,6 +44,19 @@ export default function DashboardPage() {
       const result = await historyApi.getAll();
       return result.data;
     },
+  });
+
+  const { data: aiConnectionStatus, isLoading: isAiStatusLoading } = useQuery({
+    queryKey: ["ai-connection-status", llmSettings.aiSource, llmSettings.provider, llmSettings.model],
+    queryFn: async () => {
+      try {
+        const res = await llmSettingsApi.testConnectionActive();
+        return res;
+      } catch (err) {
+        return { connected: false, message: "Connection failed" };
+      }
+    },
+    refetchInterval: 30000, // Refresh every 30s
   });
 
   const history = historyData || [];
@@ -301,32 +318,60 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Database Status */}
+            {/* System Status */}
             <div className="bg-card border border-border rounded-2xl p-6">
               <div className="flex items-center gap-2 mb-4">
                 <Database className="w-4 h-4 text-primary" />
-                <h3 className="font-semibold text-foreground">Database Status</h3>
+                <h3 className="font-semibold text-foreground">System Status</h3>
               </div>
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="text-sm font-medium text-emerald-500">Connected</span>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-sm">
-                <div className="bg-muted/30 rounded-xl p-3">
-                  <p className="text-muted-foreground text-xs">Engine</p>
-                  <p className="font-semibold text-foreground mt-0.5">PostgreSQL</p>
+              <div className="space-y-3">
+                {/* DB Row */}
+                <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-xl">
+                  <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-muted-foreground">Database</p>
+                    <p className="text-sm font-semibold text-foreground">PostgreSQL · askdb</p>
+                  </div>
+                  <span className="text-xs font-medium text-emerald-500 shrink-0">🟢 Connected</span>
                 </div>
-                <div className="bg-muted/30 rounded-xl p-3">
-                  <p className="text-muted-foreground text-xs">Version</p>
-                  <p className="font-semibold text-foreground mt-0.5">16.x</p>
+
+                {/* AI Provider Row */}
+                <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-xl">
+                  <div className="w-2 h-2 rounded-full bg-violet-500 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-muted-foreground">AI Provider</p>
+                    <p className="text-sm font-semibold text-foreground">
+                      {(() => {
+                        const info = PROVIDER_INFO[llmSettings?.provider as AnyProvider];
+                        return info
+                          ? `${info.emoji} ${info.label}`
+                          : llmSettings?.provider || "Groq";
+                      })()}
+                    </p>
+                  </div>
+                  <div className="flex flex-col items-end shrink-0">
+                    <span className="text-xs text-muted-foreground mb-0.5">
+                      {llmSettings?.aiSource === "cloud" ? "☁ Cloud" : "💻 Local"}
+                    </span>
+                    {isAiStatusLoading ? (
+                      <span className="text-xs font-medium text-muted-foreground animate-pulse">Checking...</span>
+                    ) : aiConnectionStatus?.connected ? (
+                      <span className="text-[10px] font-medium text-emerald-500 bg-emerald-500/10 px-1.5 py-0.5 rounded-md">🟢 Connected</span>
+                    ) : (
+                      <span className="text-[10px] font-medium text-red-500 bg-red-500/10 px-1.5 py-0.5 rounded-md">🔴 Disconnected</span>
+                    )}
+                  </div>
                 </div>
-                <div className="bg-muted/30 rounded-xl p-3">
-                  <p className="text-muted-foreground text-xs">Database</p>
-                  <p className="font-semibold text-foreground mt-0.5">askdb</p>
-                </div>
-                <div className="bg-muted/30 rounded-xl p-3">
-                  <p className="text-muted-foreground text-xs">AI Model</p>
-                  <p className="font-semibold text-foreground mt-0.5">LLaMA 3.3</p>
+
+                {/* Model Row */}
+                <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-xl">
+                  <div className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-muted-foreground">Model</p>
+                    <p className="text-sm font-semibold text-foreground truncate" title={llmSettings?.model}>
+                      {llmSettings?.model || "—"}
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>

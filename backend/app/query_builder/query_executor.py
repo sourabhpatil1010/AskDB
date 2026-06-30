@@ -56,5 +56,5 @@ class QueryExecutor:
             return [dict(row) for row in rows]
             
         except Exception as e:
-            logger.error(f"Database execution failed: {str(e)}")
+            logger.exception(f"Database execution failed: {str(e)}", exc_info=e)
             raise

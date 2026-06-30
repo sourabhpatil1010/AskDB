@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.v1.api import api_router
 import logging
-from app.core.llm import llm_settings
+from app.core.providers.factory import ProviderFactory
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,11 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Using LLM Provider: Groq")
-    logger.info(f"Using Model: {llm_settings.model_name}")
+    factory = ProviderFactory.get_instance()
+    config = factory.get_config()
+    logger.info(f"LLM Source: {config['source']}")
+    logger.info(f"LLM Provider: {config['provider']}")
+    logger.info(f"LLM Model: {config['model']}")
 
 @app.get("/")
 def root():

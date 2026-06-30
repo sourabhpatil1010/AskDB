@@ -1,6 +1,7 @@
 import logging
 from typing import Tuple, Dict, Any
 from app.ai.structured_output.schemas import StructuredQuery, OperatorEnum
+from app.query_builder.param_coercion import coerce_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,8 @@ class SQLGenerator:
     def generate(self, query: StructuredQuery) -> Tuple[str, Dict[str, Any]]:
         sql_parts = []
         parameters = {}
+        # Maps each parameter name -> (table, field) for type coercion
+        param_field_map: Dict[str, tuple[str, str]] = {}
         param_counter = 1
 
         # SELECT
@@ -34,6 +37,7 @@ class SQLGenerator:
         if query.filters:
             where_clauses = []
             for f in query.filters:
+                filter_table = f.table or query.table
                 qual_field = f"{f.table}.{f.field}" if f.table else f.field
                 param_name = f"{f.field.replace('(', '').replace(')', '')}_{param_counter}"
                 if f.table:
@@ -48,6 +52,8 @@ class SQLGenerator:
                     where_clauses.append(f"{qual_field} BETWEEN :{param_name_1} AND :{param_name_2}")
                     parameters[param_name_1] = f.value[0]
                     parameters[param_name_2] = f.value[1]
+                    param_field_map[param_name_1] = (filter_table, f.field)
+                    param_field_map[param_name_2] = (filter_table, f.field)
                 elif op == "IN":
                     # For IN we need to dynamically generate parameters like (:param_1, :param_2)
                     in_params = []
@@ -55,11 +61,13 @@ class SQLGenerator:
                         p_name = f"{param_name}_{idx}"
                         in_params.append(f":{p_name}")
                         parameters[p_name] = val
+                        param_field_map[p_name] = (filter_table, f.field)
                     in_str = ", ".join(in_params)
                     where_clauses.append(f"{qual_field} IN ({in_str})")
                 else:
                     where_clauses.append(f"{qual_field} {op} :{param_name}")
                     parameters[param_name] = f.value
+                    param_field_map[param_name] = (filter_table, f.field)
                 
                 param_counter += 1
 
@@ -86,5 +94,9 @@ class SQLGenerator:
             sql_parts.append(f"OFFSET {query.offset}")
 
         final_sql = "\n".join(sql_parts) + ";"
-        
+
+        # Coerce parameter types based on SQLAlchemy column metadata
+        if parameters:
+            parameters = coerce_parameters(query.table, parameters, param_field_map)
+
         return final_sql, parameters

@@ -9,6 +9,24 @@ export interface SavedQuery {
   isFavorite: boolean;
 }
 
+export type AISource = 'cloud' | 'local';
+
+export type CloudProvider = 'groq' | 'openai' | 'gemini' | 'anthropic' | 'openrouter';
+
+export type AnyProvider = CloudProvider | 'ollama';
+
+export interface LLMSettings {
+  aiSource: AISource;
+  provider: AnyProvider;
+  model: string;
+  ollamaBaseUrl: string;
+  /** Runtime API key — stored in sessionStorage (or localStorage if rememberKey=true).
+   *  Never sent to PostgreSQL. */
+  apiKey: string;
+  /** Whether to persist the API key in localStorage between sessions. */
+  rememberKey: boolean;
+}
+
 interface AppStore {
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -20,10 +38,11 @@ interface AppStore {
   updateSavedQuery: (id: string, updates: Partial<SavedQuery>) => void;
   settings: {
     apiUrl: string;
-    llmModel: string;
     language: string;
   };
   updateSettings: (settings: Partial<AppStore['settings']>) => void;
+  llmSettings: LLMSettings;
+  updateLLMSettings: (settings: Partial<LLMSettings>) => void;
 }
 
 export const useAppStore = create<AppStore>()(
@@ -63,16 +82,38 @@ export const useAppStore = create<AppStore>()(
         })),
       settings: {
         apiUrl: import.meta.env.VITE_API_URL || 'http://localhost:8000',
-        llmModel: 'llama-3.3-70b-versatile',
         language: 'en',
       },
       updateSettings: (settings) =>
         set((state) => ({
           settings: { ...state.settings, ...settings },
         })),
+      llmSettings: {
+        aiSource: 'cloud',
+        provider: 'groq',
+        model: 'qwen/qwen3-32b',
+        ollamaBaseUrl: 'http://localhost:11434',
+        apiKey: '',
+        rememberKey: false,
+      },
+      updateLLMSettings: (llmSettings) =>
+        set((state) => ({
+          llmSettings: { ...state.llmSettings, ...llmSettings },
+        })),
     }),
     {
       name: 'askdb-app-store',
+      // Never persist the API key in localStorage unless rememberKey is true.
+      // We achieve this by stripping the apiKey from the persisted object
+      // when rememberKey is false.
+      partialize: (state) => ({
+        ...state,
+        llmSettings: {
+          ...state.llmSettings,
+          // Only persist the API key when user opted in
+          apiKey: state.llmSettings.rememberKey ? state.llmSettings.apiKey : '',
+        },
+      }),
     }
   )
 );

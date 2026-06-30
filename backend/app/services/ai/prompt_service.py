@@ -1,6 +1,5 @@
 import logging
 from pathlib import Path
-from langchain_core.prompts import PromptTemplate
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +22,3 @@ class PromptService:
             logger.error(f"Failed to load prompt {filename}: {str(e)}")
             raise
 
-    def render_prompt(self, template_str: str, **kwargs) -> str:
-        """Render a Langchain prompt template with variables."""
-        try:
-            template = PromptTemplate.from_template(template_str)
-            return template.format(**kwargs)
-        except Exception as e:
-            logger.error(f"Failed to render prompt: {str(e)}")
-            raise

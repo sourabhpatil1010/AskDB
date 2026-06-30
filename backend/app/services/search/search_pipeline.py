@@ -78,10 +78,12 @@ class SearchPipeline:
         except Exception as e:
             total_execution_time_ms = int((time.perf_counter() - pipeline_start) * 1000)
             execution_time_ms = total_execution_time_ms
-            logger.error(f"--- Pipeline Failed in {total_execution_time_ms}ms: {str(e)} ---")
-            status = self._map_exception_to_status(e)
-            error_message = str(e)
-            raise
+            import tenacity
+            real_error = e.last_attempt.exception() if isinstance(e, tenacity.RetryError) else e
+            logger.exception(f"--- Pipeline Failed in {total_execution_time_ms}ms: {str(real_error)} ---", exc_info=real_error)
+            status = self._map_exception_to_status(real_error)
+            error_message = str(real_error)
+            raise real_error from e
         finally:
             # 4. Auto-save search history
             try:
@@ -98,4 +100,4 @@ class SearchPipeline:
                     row_count=row_count
                 )
             except Exception as e:
-                logger.error(f"Failed to save search history in finally block: {str(e)}")
+                logger.exception(f"Failed to save search history in finally block: {str(e)}", exc_info=e)

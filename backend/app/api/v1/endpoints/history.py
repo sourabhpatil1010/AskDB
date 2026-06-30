@@ -21,7 +21,7 @@ async def get_all_history(
         histories = await service.get_all_history(session)
         return {"success": True, "data": histories}
     except Exception as e:
-        logger.error(f"Error fetching history: {str(e)}")
+        logger.exception(f"Error fetching history: {str(e)}", exc_info=e)
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/{id}")

@@ -5,7 +5,7 @@ from tenacity import retry, wait_exponential, stop_after_attempt
 
 from app.core.llm import get_llm
 from app.ai.structured_output.schemas import StructuredQuery
-from app.ai.validators.schema_validator import SchemaValidator
+from app.query_builder.query_validator import QueryValidator
 from app.services.ai.prompt_service import PromptService
 from app.models import Base
 
@@ -15,7 +15,7 @@ class JSONGenerationChain:
     def __init__(self):
         self.llm = get_llm()
         self.parser = PydanticOutputParser(pydantic_object=StructuredQuery)
-        self.validator = SchemaValidator()
+        self.validator = QueryValidator()
         self.prompt_service = PromptService()
         
         schema_lines = []
@@ -65,8 +65,10 @@ class JSONGenerationChain:
             return structured_query
             
         except ValueError as ve:
-            logger.error(f"Validation Error: {str(ve)}. Retrying...")
+            logger.exception(f"Validation Error: {str(ve)}. Retrying...", exc_info=ve)
             raise
         except Exception as e:
-            logger.error(f"Chain execution failed: {str(e)}")
-            raise
+            import tenacity
+            real_error = e.last_attempt.exception() if isinstance(e, tenacity.RetryError) else e
+            logger.exception(f"Chain execution failed: {str(real_error)}", exc_info=real_error)
+            raise real_error from e

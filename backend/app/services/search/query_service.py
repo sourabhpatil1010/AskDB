@@ -35,9 +35,9 @@ class QueryService:
             
         except ValueError as e:
             execution_time_ms = int((time.perf_counter() - start_time) * 1000)
-            logger.error(f"Unsafe query error in {execution_time_ms}ms: {str(e)}")
+            logger.exception(f"Unsafe query error in {execution_time_ms}ms: {str(e)}", exc_info=e)
             raise
         except Exception as e:
             execution_time_ms = int((time.perf_counter() - start_time) * 1000)
-            logger.error(f"SQL execution error in {execution_time_ms}ms: {str(e)}")
+            logger.exception(f"SQL execution error in {execution_time_ms}ms: {str(e)}", exc_info=e)
             raise

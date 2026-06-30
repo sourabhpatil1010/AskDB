@@ -34,8 +34,8 @@ class SQLService:
             return sql_query, parameters
             
         except ValueError as e:
-            logger.error(f"Validation error during SQL generation: {str(e)}")
+            logger.exception(f"Validation error during SQL generation: {str(e)}", exc_info=e)
             raise
         except Exception as e:
-            logger.error(f"Failed to generate SQL: {str(e)}")
+            logger.exception(f"Failed to generate SQL: {str(e)}", exc_info=e)
             raise
