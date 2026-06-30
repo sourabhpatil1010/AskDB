@@ -26,6 +26,7 @@ import {
 } from "recharts";
 import { historyApi } from "@/services/history.service";
 import { formatMs } from "@/lib/utils";
+import { formatCompactNumber, formatInteger } from "@/utils/formatters";
 
 const COLORS = [
   "hsl(262, 83%, 58%)",
@@ -189,7 +190,10 @@ export default function AnalyticsPage() {
           <p className="text-xs font-medium text-foreground mb-1">{label}</p>
           {payload.map((p: any, i: number) => (
             <p key={i} className="text-xs text-muted-foreground">
-              {p.name}: <span className="text-foreground font-medium">{p.value}</span>
+              {p.name}:{" "}
+              <span className="text-foreground font-medium">
+                {formatCompactNumber(p.value)}
+              </span>
             </p>
           ))}
         </div>

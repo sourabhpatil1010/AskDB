@@ -19,6 +19,7 @@ import { useAppStore } from "@/store/appStore";
 import type { AnyProvider } from "@/store/appStore";
 import { PROVIDER_INFO } from "@/config/providers";
 import { formatDate, formatMs } from "@/lib/utils";
+import { formatInteger } from "@/utils/formatters";
 
 const container = {
   hidden: { opacity: 0 },
@@ -74,7 +75,7 @@ export default function DashboardPage() {
   const stats = [
     {
       label: "Total Queries",
-      value: totalQueries.toLocaleString(),
+      value: formatInteger(totalQueries),
       icon: Search,
       gradient: "from-violet-500 to-purple-600",
       change: `+${Math.min(totalQueries, 12)} this week`,

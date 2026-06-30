@@ -24,6 +24,8 @@ import type { SearchResponse } from "@/types/search";
 import { JsonViewer } from "@/components/viewers/JsonViewer";
 import { SqlViewer } from "@/components/viewers/SqlViewer";
 import { ResultTable } from "@/components/viewers/ResultTable";
+import { ChartContainer } from "@/components/charts/ChartContainer";
+import { useChartData } from "@/hooks/useChartData";
 
 const examplePrompts = [
   { text: "Show all departments", icon: "🏢" },
@@ -49,8 +51,16 @@ export default function AISearchPage() {
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeStep, setActiveStep] = useState(-1);
-  const [activeTab, setActiveTab] = useState<"results" | "sql" | "json" | "info">("results");
+  const [activeTab, setActiveTab] = useState<"results" | "sql" | "json" | "info" | "visualization">("results");
   const addSavedQuery = useAppStore((s) => s.addSavedQuery);
+
+  // ── Visualization Engine ─────────────────────────────────────────────────
+  // Reads from existing result.rows — NEVER executes another SQL query
+  const { chartConfig, activeChartType, setChartType, hasVisualization, recommendedType } =
+    useChartData({
+      columns: result?.columns ?? [],
+      rows: result?.rows ?? [],
+    });
 
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) return;
@@ -360,7 +370,7 @@ export default function AISearchPage() {
               </div>
 
               {/* Tabs */}
-              <div className="flex items-center gap-1 mb-4 bg-muted/30 p-1 rounded-xl w-fit">
+              <div className="flex items-center gap-1 mb-4 bg-muted/30 p-1 rounded-xl w-fit flex-wrap">
                 {(["results", "sql", "json", "info"] as const).map((tab) => (
                   <button
                     key={tab}
@@ -380,6 +390,21 @@ export default function AISearchPage() {
                       : "Info"}
                   </button>
                 ))}
+                {/* Visualization tab — only shown when chart is available */}
+                <button
+                  onClick={() => setActiveTab("visualization")}
+                  className={`px-4 py-2 text-sm font-medium rounded-lg transition-all flex items-center gap-1.5 ${
+                    activeTab === "visualization"
+                      ? "bg-card text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  Visualization
+                  {hasVisualization && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                  )}
+                </button>
               </div>
 
               {/* Tab Content */}
@@ -464,6 +489,21 @@ export default function AISearchPage() {
                           </div>
                         )}
                     </div>
+                  </motion.div>
+                )}
+                {activeTab === "visualization" && (
+                  <motion.div
+                    key="visualization"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                  >
+                    <ChartContainer
+                      chartConfig={chartConfig}
+                      activeChartType={activeChartType}
+                      recommendedType={recommendedType}
+                      onTypeChange={setChartType}
+                    />
                   </motion.div>
                 )}
               </AnimatePresence>

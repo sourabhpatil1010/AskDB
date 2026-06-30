@@ -32,6 +32,7 @@ import {
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
 import { copyToClipboard, formatMs } from "@/lib/utils";
+import { smartFormatNumber } from "@/utils/formatters";
 
 interface ResultTableProps {
   columns: string[];
@@ -75,8 +76,27 @@ export function ResultTable({
         ),
         cell: ({ getValue }) => {
           const value = getValue();
-          if (value === null)
+          if (value === null || value === undefined)
             return <span className="text-muted-foreground/50 italic">null</span>;
+
+          // Smart-format numeric values with thousands separators and 2 dp
+          const raw = value;
+          const asNum = Number(raw);
+          const isNumeric =
+            raw !== "" &&
+            raw !== true &&
+            raw !== false &&
+            !isNaN(asNum) &&
+            isFinite(asNum);
+
+          if (isNumeric) {
+            return (
+              <span className="text-sm tabular-nums">
+                {smartFormatNumber(raw)}
+              </span>
+            );
+          }
+
           return <span className="text-sm">{String(value)}</span>;
         },
       })),
