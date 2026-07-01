@@ -8,8 +8,12 @@ logger = logging.getLogger(__name__)
 class SQLGenerator:
     """
     Generates parameterized PostgreSQL queries from StructuredQuery objects.
-    Uses SQLAlchemy's dialect for safe escaping or generates raw parameterized strings.
-    We will generate raw parameterized strings with format :param_name for asyncpg.
+    Supports:
+    - SELECT with aggregation expressions (COUNT, SUM, AVG, MIN, MAX)
+    - DATE_TRUNC / EXTRACT time granularity in GROUP BY and SELECT
+    - HAVING clause conditions on aggregated results
+    - JOINs, WHERE, ORDER BY, LIMIT, OFFSET
+    - Parameterized filters via :param_name binding
     """
     def __init__(self):
         pass
@@ -55,7 +59,6 @@ class SQLGenerator:
                     param_field_map[param_name_1] = (filter_table, f.field)
                     param_field_map[param_name_2] = (filter_table, f.field)
                 elif op == "IN":
-                    # For IN we need to dynamically generate parameters like (:param_1, :param_2)
                     in_params = []
                     for idx, val in enumerate(f.value):
                         p_name = f"{param_name}_{idx}"
@@ -76,6 +79,20 @@ class SQLGenerator:
         # GROUP BY
         if query.group_by:
             sql_parts.append("GROUP BY " + ", ".join(query.group_by))
+
+        # HAVING — aggregated condition filtering
+        if query.having:
+            having_clauses = []
+            for h in query.having:
+                op = h.operator.strip()
+                # Validate operator to prevent injection
+                if op not in (">", "<", ">=", "<=", "=", "!="):
+                    logger.warning(f"Skipping HAVING with invalid operator: '{op}'")
+                    continue
+                # Value is always a numeric literal from the planner — safe to inline
+                having_clauses.append(f"{h.column} {op} {h.value}")
+            if having_clauses:
+                sql_parts.append("HAVING " + "\n  AND ".join(having_clauses))
 
         # ORDER BY
         if query.sort:
@@ -98,5 +115,9 @@ class SQLGenerator:
         # Coerce parameter types based on SQLAlchemy column metadata
         if parameters:
             parameters = coerce_parameters(query.table, parameters, param_field_map)
+
+        logger.info(f"Generated SQL:\n{final_sql}")
+        if parameters:
+            logger.debug(f"Parameters: {parameters}")
 
         return final_sql, parameters

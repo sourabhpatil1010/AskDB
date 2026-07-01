@@ -2,6 +2,7 @@ from enum import Enum
 from typing import Any, List, Optional
 from pydantic import BaseModel, Field
 
+
 class OperatorEnum(str, Enum):
     EQ = "="
     NEQ = "!="
@@ -15,9 +16,11 @@ class OperatorEnum(str, Enum):
     IS_NULL = "IS NULL"
     IS_NOT_NULL = "IS NOT NULL"
 
+
 class JoinCondition(BaseModel):
     table: str = Field(description="The table to join with")
     on: str = Field(description="The ON condition, e.g. 'employees.department_id = departments.id'")
+
 
 class FilterCondition(BaseModel):
     table: Optional[str] = Field(default=None, description="The table this field belongs to")
@@ -25,17 +28,43 @@ class FilterCondition(BaseModel):
     operator: OperatorEnum = Field(description="The comparison operator")
     value: str | int | float | list[str] | list[int] | list[float] | None = Field(default=None, description="The value to compare against")
 
+
 class SortCondition(BaseModel):
     table: Optional[str] = Field(default=None, description="The table this field belongs to")
-    field: str = Field(description="The column name to sort by")
+    field: str = Field(description="The column name or expression to sort by")
     direction: str = Field(description="Sort direction, either 'asc' or 'desc'")
+
+
+class HavingCondition(BaseModel):
+    """Represents a HAVING clause condition applied to an aggregated column or expression."""
+    column: str = Field(description="The aggregated expression to check, e.g. 'COUNT(employees.id)', 'AVG(payroll.base_salary)'")
+    operator: str = Field(description="The comparison operator: >, <, >=, <=, =, !=")
+    value: float | int = Field(description="The numeric threshold value to compare against")
+
 
 class StructuredQuery(BaseModel):
     table: str = Field(description="The primary table to query from")
     joins: Optional[List[JoinCondition]] = Field(default=None, description="List of JOIN conditions")
-    columns: List[str] = Field(description="List of columns to select. Use table.column format if using joins.")
+    columns: List[str] = Field(description=(
+        "List of columns or expressions to SELECT. "
+        "For aggregations use: COUNT(table.col) AS alias, AVG(table.col) AS alias. "
+        "For time granularity use: DATE_TRUNC('month', table.date_col) AS month. "
+        "Use table.column format when joins are present."
+    ))
     filters: Optional[List[FilterCondition]] = Field(default=None, description="List of filter conditions")
     sort: Optional[SortCondition] = Field(default=None, description="Sorting rules")
-    group_by: Optional[List[str]] = Field(default=None, description="Columns to group by")
+    group_by: Optional[List[str]] = Field(default=None, description=(
+        "Columns or expressions to GROUP BY. "
+        "For time granularity use the same DATE_TRUNC/EXTRACT expression as in columns, e.g. DATE_TRUNC('month', attendance.date). "
+        "Use table.column format when joins are present."
+    ))
+    having: Optional[List[HavingCondition]] = Field(default=None, description=(
+        "HAVING clause conditions on aggregated results. "
+        "Example: COUNT(employees.id) > 20, AVG(payroll.base_salary) > 100000"
+    ))
+    time_granularity: Optional[str] = Field(default=None, description=(
+        "The time bucket granularity for grouping: 'day', 'week', 'month', 'quarter', 'year'. "
+        "Set this when the planner specifies time-based grouping."
+    ))
     limit: Optional[int] = Field(default=50, description="Maximum number of rows to return")
     offset: Optional[int] = Field(default=0, description="Number of rows to skip")

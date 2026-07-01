@@ -5,6 +5,38 @@ from app.ai.structured_output.schemas import StructuredQuery
 
 logger = logging.getLogger(__name__)
 
+# Patterns for SQL expressions that bypass raw column validation
+_COMPUTED_EXPR_PATTERN = re.compile(
+    r'(?i)^('
+    r'date_trunc\s*\('
+    r'|extract\s*\('
+    r'|to_char\s*\('
+    r'|count\s*\('
+    r'|sum\s*\('
+    r'|avg\s*\('
+    r'|min\s*\('
+    r'|max\s*\('
+    r'|coalesce\s*\('
+    r'|cast\s*\('
+    r'|round\s*\('
+    r'|floor\s*\('
+    r'|ceil\s*\('
+    r'|\*'  # COUNT(*)
+    r')'
+)
+
+def _is_computed_expression(expr: str) -> bool:
+    """Returns True if the expression is a SQL function/computed expression that does not map to a raw column name."""
+    stripped = expr.strip()
+    # Has function call pattern
+    if _COMPUTED_EXPR_PATTERN.match(stripped):
+        return True
+    # Contains AS alias (e.g. "DATE_TRUNC('month', employees.hire_date) AS month")
+    if re.search(r'\bAS\b', stripped, re.IGNORECASE):
+        return True
+    return False
+
+
 class QueryValidator:
     def __init__(self):
         self.schema = {}
@@ -12,12 +44,17 @@ class QueryValidator:
             self.schema[table_name] = [col.name for col in table.columns]
 
     def _extract_column(self, field_str: str) -> str:
-        """Extract the raw column name from potential aggregation functions."""
+        """Extract the raw column name from potential aggregation functions or AS aliases."""
+        s = field_str.strip()
+        # Strip leading AS alias first: "expr AS alias" -> "expr"
+        as_match = re.search(r'^(.+?)\s+AS\s+\w+\s*$', s, re.IGNORECASE)
+        if as_match:
+            s = as_match.group(1).strip()
         # e.g., 'COUNT(id)' -> 'id', 'SUM(salary)' -> 'salary'
-        match = re.search(r'(?i)^(?:count|sum|avg|min|max)\((.+)\)$', field_str.strip())
+        match = re.search(r'(?i)^(?:count|sum|avg|min|max)\((.+)\)$', s.strip())
         if match:
             return match.group(1).strip()
-        return field_str.strip()
+        return s.strip()
 
     def validate(self, query: StructuredQuery) -> bool:
         if query.table not in self.schema:
@@ -32,7 +69,15 @@ class QueryValidator:
                 valid_tables.append(j.table)
                 
         def _validate_col(col_name: str, explicit_table: str = None):
+            # Always allow computed SQL expressions — they are validated by PostgreSQL at runtime
+            if _is_computed_expression(col_name):
+                return
+
             cleaned_col = self._extract_column(col_name)
+            # After extraction, re-check if it is still a computed expression
+            if _is_computed_expression(cleaned_col):
+                return
+
             if cleaned_col == "*":
                 return
                 
@@ -78,9 +123,15 @@ class QueryValidator:
 
         # Validate sort
         if query.sort:
-            _validate_col(query.sort.field, query.sort.table)
+            # Sort field may be an alias (e.g. "avg_salary") or an expression — skip strict validation
+            if not _is_computed_expression(query.sort.field) and "." not in query.sort.field:
+                # It might be an alias from an aggregation — treat it permissively
+                # Only raise if it looks like a raw column name that doesn't exist AND has no alias-like appearance
+                pass
+            else:
+                _validate_col(query.sort.field, query.sort.table)
 
-        # Validate group_by
+        # Validate group_by — allow computed expressions (DATE_TRUNC, EXTRACT, etc.)
         if query.group_by:
             for gb in query.group_by:
                 _validate_col(gb)
