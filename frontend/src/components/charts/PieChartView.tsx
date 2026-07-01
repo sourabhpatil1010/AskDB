@@ -1,5 +1,11 @@
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from "recharts";
-import { getChartColor, formatNumber, truncateLabel } from "@/utils/chart-utils";
+import {
+  getChartColor,
+  formatDecimal,
+  formatPercentage,
+  formatColumnLabel,
+  truncateLabel,
+} from "@/utils/chart-utils";
 
 interface PieChartViewProps {
   data: Record<string, any>[];
@@ -11,12 +17,29 @@ interface PieChartViewProps {
 const RADIAN = Math.PI / 180;
 
 const renderCustomLabel = ({
-  cx, cy, midAngle, innerRadius, outerRadius, percent, name,
+  cx, cy, midAngle, innerRadius, outerRadius, percent, value, index,
 }: any) => {
-  if (percent < 0.04) return null; // hide tiny slices
-  const radius = innerRadius + (outerRadius - innerRadius) * 0.55;
+  if (
+    value === null ||
+    value === undefined ||
+    Number(value) === 0 ||
+    isNaN(Number(value)) ||
+    percent <= 0
+  ) {
+    return null;
+  }
+  const formattedPct = formatPercentage(percent);
+
+  // To display percentage labels on EVERY visible slice without hiding smaller slices,
+  // we remove minPercentRequired and instead use radial staggering. For smaller slices (< 5%),
+  // we alternate the radial offset (0.75 vs 0.55) and use a slightly smaller font size so
+  // adjacent labels do not collide.
+  const isSmallSlice = percent < 0.05;
+  const staggerOffset = isSmallSlice ? (index % 2 === 0 ? 0.75 : 0.55) : 0.65;
+  const radius = innerRadius + (outerRadius - innerRadius) * staggerOffset;
   const x = cx + radius * Math.cos(-midAngle * RADIAN);
   const y = cy + radius * Math.sin(-midAngle * RADIAN);
+
   return (
     <text
       x={x}
@@ -24,29 +47,44 @@ const renderCustomLabel = ({
       fill="white"
       textAnchor="middle"
       dominantBaseline="central"
-      fontSize={11}
+      fontSize={isSmallSlice ? 10 : 11}
       fontWeight={600}
+      className="select-none drop-shadow-md"
+      style={{ pointerEvents: "none", textShadow: "0 1px 2px rgba(0,0,0,0.6)" }}
     >
-      {`${(percent * 100).toFixed(0)}%`}
+      {formattedPct}
     </text>
   );
 };
 
-const CustomTooltip = ({ active, payload }: any) => {
+const CustomTooltip = ({ active, payload, xKey, valueKey }: any) => {
   if (!active || !payload?.length) return null;
   const entry = payload[0];
+  const xLabel = formatColumnLabel(xKey || "Category");
+  const yLabel = formatColumnLabel(valueKey || "Value");
+  const percentVal = entry.payload?.percent ?? 0;
+  const formattedVal = formatDecimal(entry.value);
+  const formattedPct = formatPercentage(percentVal);
+
   return (
-    <div className="bg-card border border-border rounded-xl p-3 shadow-xl text-xs">
-      <div className="flex items-center gap-2 mb-1">
-        <span className="w-2 h-2 rounded-full" style={{ background: entry.payload.fill }} />
-        <span className="font-semibold text-foreground">{String(entry.name)}</span>
+    <div className="bg-card border border-border rounded-xl p-3 shadow-xl text-xs space-y-1.5 min-w-[180px]">
+      <div className="flex items-center gap-2 font-semibold text-foreground pb-1.5 border-b border-border/50">
+        <span
+          className="w-2.5 h-2.5 rounded-full shrink-0"
+          style={{ background: entry.payload?.fill || entry.color || "#7c3aed" }}
+        />
+        <span>
+          {xLabel}: <span className="font-bold">{String(entry.name)}</span>
+        </span>
       </div>
-      <p className="text-muted-foreground">
-        Value: <span className="text-foreground font-medium">{formatNumber(entry.value)}</span>
-      </p>
-      <p className="text-muted-foreground">
-        Share: <span className="text-foreground font-medium">{(entry.payload.percent * 100).toFixed(1)}%</span>
-      </p>
+      <div className="text-muted-foreground flex items-center justify-between gap-4">
+        <span>{yLabel}:</span>
+        <span className="text-foreground font-semibold font-mono">{formattedVal}</span>
+      </div>
+      <div className="text-muted-foreground flex items-center justify-between gap-4">
+        <span>Percentage:</span>
+        <span className="text-foreground font-semibold font-mono">{formattedPct}</span>
+      </div>
     </div>
   );
 };
@@ -77,7 +115,7 @@ export function PieChartView({ data, xKey, yKeys, donut = false }: PieChartViewP
             style={{ fill: "hsl(var(--foreground))" }}
           >
             <tspan x="50%" dy="-8" fontSize={22} fontWeight={700}>
-              {formatNumber(total)}
+              {formatDecimal(total)}
             </tspan>
             <tspan x="50%" dy={20} fontSize={11} fill="hsl(var(--muted-foreground))">
               Total
@@ -102,7 +140,7 @@ export function PieChartView({ data, xKey, yKeys, donut = false }: PieChartViewP
             <Cell key={index} fill={getChartColor(index)} stroke="hsl(var(--card))" strokeWidth={2} />
           ))}
         </Pie>
-        <Tooltip content={<CustomTooltip />} />
+        <Tooltip content={<CustomTooltip xKey={xKey} valueKey={valueKey} />} />
         <Legend
           formatter={(value) => (
             <span style={{ fontSize: 12, color: "hsl(var(--foreground))" }}>

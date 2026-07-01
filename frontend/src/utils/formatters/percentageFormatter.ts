@@ -20,7 +20,7 @@ import { EMPTY_DISPLAY } from "./numberFormatter";
 export function formatPercentage(
   value: unknown,
   decimals = 2,
-  locale = "en-IN",
+  locale = "en-US",
 ): string {
   if (value === null || value === undefined || value === "") return EMPTY_DISPLAY;
   const n = Number(value);
@@ -46,7 +46,7 @@ export function formatPercentage(
 export function formatPercentageValue(
   value: unknown,
   decimals = 2,
-  locale = "en-IN",
+  locale = "en-US",
 ): string {
   if (value === null || value === undefined || value === "") return EMPTY_DISPLAY;
   const n = Number(value);
@@ -64,11 +64,13 @@ export function formatPercentageValue(
  * formatPercentageRaw
  *
  * Returns a simple "X%" string without using Intl style,
- * useful for compact display (e.g. "87.6%", "45%").
+ * useful for compact display (e.g. "87.6%", "45%", "100%").
+ * Strips trailing decimal zeroes when not needed.
  */
 export function formatPercentageRaw(value: unknown, decimals = 1): string {
   if (value === null || value === undefined || value === "") return EMPTY_DISPLAY;
   const n = Number(value);
   if (isNaN(n) || !isFinite(n)) return EMPTY_DISPLAY;
-  return `${n.toFixed(decimals)}%`;
+  const rounded = Number(n.toFixed(decimals));
+  return `${rounded}%`;
 }

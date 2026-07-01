@@ -26,7 +26,8 @@ import {
 } from "recharts";
 import { historyApi } from "@/services/history.service";
 import { formatMs } from "@/lib/utils";
-import { formatCompactNumber, formatInteger } from "@/utils/formatters";
+import { formatCompactNumber, formatInteger, formatPercentageRaw } from "@/utils/formatters";
+import { AnalyticsService } from "@/services/analytics.service";
 
 const COLORS = [
   "hsl(262, 83%, 58%)",
@@ -50,22 +51,14 @@ export default function AnalyticsPage() {
 
   const history = historyData || [];
 
-  const stats = useMemo(() => {
-    const total = history.length;
-    const completedHistory = history.filter(h => h.execution_time_ms !== undefined && h.execution_time_ms !== null);
-    const avgTime =
-      completedHistory.length > 0
-        ? Math.round(
-            completedHistory.reduce((sum, h) => sum + (h.execution_time_ms || 0), 0) /
-              completedHistory.length
-          )
-        : 0;
-    const successCount = history.filter(h => h.status === "SUCCESS").length;
-    const errorCount = total - successCount;
-    const successRate = total > 0 ? ((successCount / total) * 100).toFixed(1) : "0";
-
-    return { total, avgTime, successCount, errorCount, successRate };
-  }, [history]);
+  const queryStats = useMemo(() => AnalyticsService.calculateStatistics(history), [history]);
+  const stats = useMemo(() => ({
+    total: queryStats.totalQueries,
+    avgTime: queryStats.averageExecutionTime,
+    successCount: queryStats.successfulQueries,
+    errorCount: queryStats.failedQueries,
+    successRate: queryStats.successRate,
+  }), [queryStats]);
 
   // Queries per day chart data
   const queriesPerDay = useMemo(() => {
@@ -171,7 +164,7 @@ export default function AnalyticsPage() {
     },
     {
       label: "Success Rate",
-      value: `${stats.successRate}%`,
+      value: formatPercentageRaw(stats.successRate, 1),
       icon: CheckCircle2,
       gradient: "from-emerald-500 to-green-500",
     },
@@ -469,7 +462,7 @@ export default function AnalyticsPage() {
                     Overall Success Rate
                   </span>
                   <span className="text-lg font-bold text-emerald-500">
-                    {stats.successRate}%
+                    {formatPercentageRaw(stats.successRate, 1)}
                   </span>
                 </div>
               </div>

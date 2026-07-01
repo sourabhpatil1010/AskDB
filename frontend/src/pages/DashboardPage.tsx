@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { motion } from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -15,11 +16,12 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 import { historyApi } from "@/services/history.service";
 import { llmSettingsApi } from "@/services/llm-settings.service";
+import { AnalyticsService } from "@/services/analytics.service";
 import { useAppStore } from "@/store/appStore";
 import type { AnyProvider } from "@/store/appStore";
 import { PROVIDER_INFO } from "@/config/providers";
 import { formatDate, formatMs } from "@/lib/utils";
-import { formatInteger } from "@/utils/formatters";
+import { formatInteger, formatPercentageRaw } from "@/utils/formatters";
 
 const container = {
   hidden: { opacity: 0 },
@@ -61,14 +63,10 @@ export default function DashboardPage() {
   });
 
   const history = historyData || [];
-  const totalQueries = history.length;
-  const avgTime =
-    totalQueries > 0
-      ? Math.round(
-          history.reduce((sum, h) => sum + (h.execution_time_ms || 0), 0) / totalQueries
-        )
-      : 0;
-  const successRate = totalQueries > 0 ? 99.3 : 0;
+  const queryStats = useMemo(() => AnalyticsService.calculateStatistics(history), [history]);
+  const totalQueries = queryStats.totalQueries;
+  const avgTime = queryStats.averageExecutionTime;
+  const successRate = queryStats.successRate;
   const recentHistory = history.slice(0, 5);
   const favoriteQueries = savedQueries.filter((q) => q.isFavorite).slice(0, 5);
 
@@ -89,7 +87,7 @@ export default function DashboardPage() {
     },
     {
       label: "Success Rate",
-      value: `${successRate}%`,
+      value: formatPercentageRaw(successRate, 1),
       icon: CheckCircle2,
       gradient: "from-emerald-500 to-green-500",
       change: "Excellent reliability",

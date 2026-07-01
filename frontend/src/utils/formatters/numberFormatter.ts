@@ -33,7 +33,7 @@ function isValidNumber(value: unknown): value is number {
  * formatNumber(0)             → "0"
  * formatNumber(null)          → "—"
  */
-export function formatNumber(value: unknown, locale = "en-IN"): string {
+export function formatNumber(value: unknown, locale = "en-US"): string {
   if (!isValidNumber(value)) return EMPTY_DISPLAY;
   const n = Number(value);
 
@@ -58,7 +58,7 @@ export function formatNumber(value: unknown, locale = "en-IN"): string {
  * formatInteger(115244.9)  → "1,15,245"
  * formatInteger(1245)      → "1,245"
  */
-export function formatInteger(value: unknown, locale = "en-IN"): string {
+export function formatInteger(value: unknown, locale = "en-US"): string {
   if (!isValidNumber(value)) return EMPTY_DISPLAY;
   return new Intl.NumberFormat(locale, {
     maximumFractionDigits: 0,
@@ -76,7 +76,7 @@ export function formatInteger(value: unknown, locale = "en-IN"): string {
 export function formatDecimal(
   value: unknown,
   decimalPlaces = 2,
-  locale = "en-IN",
+  locale = "en-US",
 ): string {
   if (!isValidNumber(value)) return EMPTY_DISPLAY;
   return new Intl.NumberFormat(locale, {
@@ -119,7 +119,7 @@ export function formatCompactNumber(value: unknown): string {
  * - Small float (< 1000) → 2 decimal places
  * - Large float → thousands-separated, 2 decimal places
  */
-export function smartFormatNumber(value: unknown, locale = "en-IN"): string {
+export function smartFormatNumber(value: unknown, locale = "en-US"): string {
   if (!isValidNumber(value)) return EMPTY_DISPLAY;
   const n = Number(value);
   return formatNumber(n, locale);

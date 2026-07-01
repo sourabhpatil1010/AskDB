@@ -24,7 +24,12 @@ export function getChartColor(index: number): string {
 // formatNumber  → "1,15,244.73"  (en-IN locale, 2 dp, thousands-separated)
 // truncateLabel → clip long axis tick labels with ellipsis
 //
-export { formatCompactNumber as formatNumber } from "@/utils/formatters";
+export {
+  formatCompactNumber as formatNumber,
+  formatDecimal,
+  formatPercentage,
+  formatColumnLabel,
+} from "@/utils/formatters";
 export { truncateText as truncateLabel } from "@/utils/formatters";
 
 
