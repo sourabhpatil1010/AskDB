@@ -1,4 +1,5 @@
 import time
+import uuid
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any
@@ -29,10 +30,22 @@ class SearchPipeline:
             return "TIMEOUT"
         return "UNKNOWN_ERROR"
 
-    async def run_pipeline(self, session: AsyncSession, natural_language: str) -> Dict[str, Any]:
+    async def run_pipeline(
+        self,
+        session: AsyncSession,
+        natural_language: str,
+        user_id: uuid.UUID,
+    ) -> Dict[str, Any]:
+        """Run the full NL→JSON→SQL→Execute pipeline.
+
+        Args:
+            session: Async DB session.
+            natural_language: The user's question in plain text.
+            user_id: UUID of the authenticated user — used to scope history.
+        """
         pipeline_start = time.perf_counter()
         logger.info(f"--- Starting Search Pipeline for: '{natural_language}' ---")
-        
+
         structured_json = None
         sql = None
         parameters = None
@@ -41,27 +54,27 @@ class SearchPipeline:
         error_message = None
         row_count = None
         execution_time_ms = 0
-        
+
         from app.services.history.search_history_service import SearchHistoryService
         history_service = SearchHistoryService()
-        
+
         try:
-            # 1. Natural Language -> Structured JSON (includes JSON validation)
+            # 1. Natural Language → Structured JSON (includes JSON validation)
             structured_query = await self.json_service.process_query(natural_language)
             structured_json = structured_query.model_dump()
-            
-            # 2. Structured JSON -> Parameterized SQL (includes SQL validation & parameter generation)
+
+            # 2. Structured JSON → Parameterized SQL (includes SQL validation & parameter generation)
             sql, parameters = self.sql_service.build_sql(structured_json)
-            
-            # 3. SQL Execution -> Results (includes execution time, safe execution check)
+
+            # 3. SQL Execution → Results (includes execution time, safe execution check)
             db_result = await self.query_service.execute_query(session, sql, parameters)
-            
+
             row_count = db_result["row_count"]
             execution_time_ms = db_result["execution_time_ms"]
-            
+
             total_execution_time_ms = int((time.perf_counter() - pipeline_start) * 1000)
             logger.info(f"--- Pipeline Completed Successfully in {total_execution_time_ms}ms ---")
-            
+
             # 5. Construct Final Response
             return {
                 "success": True,
@@ -72,9 +85,9 @@ class SearchPipeline:
                 "execution_time_ms": execution_time_ms,
                 "row_count": row_count,
                 "columns": db_result["columns"],
-                "rows": db_result["rows"]
+                "rows": db_result["rows"],
             }
-            
+
         except Exception as e:
             total_execution_time_ms = int((time.perf_counter() - pipeline_start) * 1000)
             execution_time_ms = total_execution_time_ms
@@ -85,19 +98,21 @@ class SearchPipeline:
             error_message = str(real_error)
             raise real_error from e
         finally:
-            # 4. Auto-save search history
+            # 4. Auto-save search history (user-scoped)
             try:
                 if execution_time_ms == 0:
                     execution_time_ms = int((time.perf_counter() - pipeline_start) * 1000)
                 await history_service.save_history(
                     session=session,
+                    user_id=user_id,
                     natural_language=natural_language,
                     structured_json=structured_json,
                     generated_sql=sql,
                     execution_time_ms=execution_time_ms,
                     status=status,
                     error_message=error_message,
-                    row_count=row_count
+                    row_count=row_count,
                 )
             except Exception as e:
                 logger.exception(f"Failed to save search history in finally block: {str(e)}", exc_info=e)
+
