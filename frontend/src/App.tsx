@@ -4,7 +4,14 @@ import { Toaster } from "sonner";
 import { lazy, Suspense } from "react";
 import { AppLayout } from "./layouts/AppLayout";
 import { PageLoader } from "./components/ui/PageLoader";
+import { ProtectedRoute } from "./components/auth/ProtectedRoute";
+import { AuthGuard } from "./components/auth/AuthGuard";
 
+// Public pages (no lazy needed — small & fast)
+import LoginPage from "./pages/LoginPage";
+import RegisterPage from "./pages/RegisterPage";
+
+// Protected pages (lazy loaded)
 const DashboardPage = lazy(() => import("./pages/DashboardPage"));
 const AISearchPage = lazy(() => import("./pages/AISearchPage"));
 const HistoryPage = lazy(() => import("./pages/HistoryPage"));
@@ -28,75 +35,93 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<AppLayout />}>
-            <Route index element={<Navigate to="/dashboard" replace />} />
+        {/*
+          AuthGuard runs once on mount to revalidate a stored token.
+          This enables "stay logged in on page refresh" behaviour.
+        */}
+        <AuthGuard>
+          <Routes>
+            {/* ── Public routes ── */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+
+            {/* ── Protected routes (require authentication) ── */}
             <Route
-              path="dashboard"
+              path="/"
               element={
-                <Suspense fallback={<PageLoader />}>
-                  <DashboardPage />
-                </Suspense>
+                <ProtectedRoute>
+                  <AppLayout />
+                </ProtectedRoute>
               }
-            />
-            <Route
-              path="search"
-              element={
-                <Suspense fallback={<PageLoader />}>
-                  <AISearchPage />
-                </Suspense>
-              }
-            />
-            <Route
-              path="history"
-              element={
-                <Suspense fallback={<PageLoader />}>
-                  <HistoryPage />
-                </Suspense>
-              }
-            />
-            <Route
-              path="saved"
-              element={
-                <Suspense fallback={<PageLoader />}>
-                  <SavedQueriesPage />
-                </Suspense>
-              }
-            />
-            <Route
-              path="schema"
-              element={
-                <Suspense fallback={<PageLoader />}>
-                  <SchemaExplorerPage />
-                </Suspense>
-              }
-            />
-            <Route
-              path="analytics"
-              element={
-                <Suspense fallback={<PageLoader />}>
-                  <AnalyticsPage />
-                </Suspense>
-              }
-            />
-            <Route
-              path="settings"
-              element={
-                <Suspense fallback={<PageLoader />}>
-                  <SettingsPage />
-                </Suspense>
-              }
-            />
-            <Route
-              path="*"
-              element={
-                <Suspense fallback={<PageLoader />}>
-                  <NotFoundPage />
-                </Suspense>
-              }
-            />
-          </Route>
-        </Routes>
+            >
+              <Route index element={<Navigate to="/dashboard" replace />} />
+              <Route
+                path="dashboard"
+                element={
+                  <Suspense fallback={<PageLoader />}>
+                    <DashboardPage />
+                  </Suspense>
+                }
+              />
+              <Route
+                path="search"
+                element={
+                  <Suspense fallback={<PageLoader />}>
+                    <AISearchPage />
+                  </Suspense>
+                }
+              />
+              <Route
+                path="history"
+                element={
+                  <Suspense fallback={<PageLoader />}>
+                    <HistoryPage />
+                  </Suspense>
+                }
+              />
+              <Route
+                path="saved"
+                element={
+                  <Suspense fallback={<PageLoader />}>
+                    <SavedQueriesPage />
+                  </Suspense>
+                }
+              />
+              <Route
+                path="schema"
+                element={
+                  <Suspense fallback={<PageLoader />}>
+                    <SchemaExplorerPage />
+                  </Suspense>
+                }
+              />
+              <Route
+                path="analytics"
+                element={
+                  <Suspense fallback={<PageLoader />}>
+                    <AnalyticsPage />
+                  </Suspense>
+                }
+              />
+              <Route
+                path="settings"
+                element={
+                  <Suspense fallback={<PageLoader />}>
+                    <SettingsPage />
+                  </Suspense>
+                }
+              />
+              <Route
+                path="*"
+                element={
+                  <Suspense fallback={<PageLoader />}>
+                    <NotFoundPage />
+                  </Suspense>
+                }
+              />
+            </Route>
+          </Routes>
+        </AuthGuard>
       </BrowserRouter>
       <Toaster
         position="top-right"

@@ -22,7 +22,14 @@ python-dotenv==1.0.1
 psycopg2-binary==2.9.9
 faker==40.23.0
 
+# Auth
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+email-validator==2.3.0
+python-multipart==0.0.32
+
 tenacity==8.5.0
 httpx==0.28.1
 pytest==9.1.0
 pytest-asyncio==1.4.0
+

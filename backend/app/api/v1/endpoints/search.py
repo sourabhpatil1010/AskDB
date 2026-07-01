@@ -9,6 +9,8 @@ from app.services.ai.json_service import JSONService
 from app.services.search.sql_service import SQLService
 from app.services.search.query_service import QueryService
 from app.services.search.search_pipeline import SearchPipeline
+from app.auth.dependencies import get_current_user
+from app.models.auth.users import User
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -78,10 +80,12 @@ def get_search_pipeline() -> SearchPipeline:
 async def full_search(
     request: FullSearchRequest,
     pipeline: SearchPipeline = Depends(get_search_pipeline),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    """Execute the full NL→SQL pipeline. Requires authentication."""
     try:
-        result = await pipeline.run_pipeline(db, request.query)
+        result = await pipeline.run_pipeline(db, request.query, user_id=current_user.id)
         return FullSearchResponse(**result)
     except Exception as e:
         logger.exception(f"Search API Error (Full Pipeline): {str(e)}", exc_info=e)
@@ -90,7 +94,8 @@ async def full_search(
 @router.post("/json", response_model=SearchResponse)
 async def generate_json(
     request: SearchRequest,
-    service: JSONService = Depends(get_json_service)
+    service: JSONService = Depends(get_json_service),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         structured_query = await service.process_query(request.query)
@@ -105,7 +110,8 @@ async def generate_json(
 @router.post("/sql", response_model=SQLResponse)
 async def generate_sql(
     request: SQLRequest,
-    service: SQLService = Depends(get_sql_service)
+    service: SQLService = Depends(get_sql_service),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         sql, parameters = service.build_sql(request.structured_json)
@@ -122,7 +128,8 @@ async def generate_sql(
 async def execute_sql(
     request: ExecuteRequest,
     service: QueryService = Depends(get_query_service),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         result = await service.execute_query(db, request.sql, request.parameters)

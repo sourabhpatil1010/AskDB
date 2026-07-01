@@ -1,4 +1,4 @@
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   LayoutDashboard,
@@ -8,7 +8,6 @@ import {
   Database,
   BarChart3,
   Settings,
-  HelpCircle,
   ChevronLeft,
   ChevronRight,
   Sparkles,
@@ -16,10 +15,14 @@ import {
   Sun,
   Menu,
   X,
+  LogOut,
+  User,
+  Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store/appStore";
 import { useThemeStore } from "@/store/themeStore";
+import { useAuthStore } from "@/store/authStore";
 import { useState } from "react";
 
 const navItems = [
@@ -37,11 +40,21 @@ const bottomItems = [
 
 export function Sidebar() {
   const location = useLocation();
+  const navigate = useNavigate();
   const { sidebarCollapsed, toggleSidebar } = useAppStore();
   const { theme, toggleTheme } = useThemeStore();
+  const { user, logout, isLoading: authLoading } = useAuthStore();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const isActive = (path: string) => location.pathname === path;
+
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    await logout();
+    setLoggingOut(false);
+    navigate('/login', { replace: true });
+  };
 
   const NavLink = ({ item }: { item: (typeof navItems)[0] }) => {
     const Icon = item.icon;
@@ -166,6 +179,61 @@ export function Sidebar() {
             </>
           )}
         </button>
+
+        {/* User info + Logout */}
+        <div className="border-t border-border pt-3 mt-2">
+          {/* User avatar row */}
+          <div className={cn(
+            "flex items-center gap-3 px-3 py-2 rounded-xl mb-1",
+            sidebarCollapsed ? "justify-center" : ""
+          )}>
+            <div className="w-8 h-8 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0">
+              <User className="w-4 h-4 text-primary" />
+            </div>
+            <AnimatePresence mode="wait">
+              {!sidebarCollapsed && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="overflow-hidden min-w-0"
+                >
+                  <p className="text-sm font-medium text-foreground truncate">
+                    {user?.full_name || 'User'}
+                  </p>
+                  <p className="text-xs text-muted-foreground truncate">{user?.email}</p>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Logout button */}
+          <button
+            id="sidebar-logout"
+            onClick={handleLogout}
+            disabled={loggingOut || authLoading}
+            className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-200 w-full disabled:opacity-50"
+            aria-label="Sign out"
+          >
+            {loggingOut ? (
+              <Loader2 className="w-5 h-5 shrink-0 animate-spin" />
+            ) : (
+              <LogOut className="w-5 h-5 shrink-0" />
+            )}
+            <AnimatePresence mode="wait">
+              {!sidebarCollapsed && (
+                <motion.span
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="whitespace-nowrap"
+                >
+                  {loggingOut ? 'Signing out…' : 'Sign out'}
+                </motion.span>
+              )}
+            </AnimatePresence>
+          </button>
+        </div>
       </div>
     </>
   );
