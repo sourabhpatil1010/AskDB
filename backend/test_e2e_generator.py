@@ -10,64 +10,106 @@ query = StructuredQuery(
     table="employees",
     columns=["first_name", "last_name", "hire_date"],
     filters=[
-        FilterCondition(table="employees", field="hire_date", operator=OperatorEnum.GTE, value="2024-01-01"),
+        FilterCondition(
+            table="employees",
+            field="hire_date",
+            operator=OperatorEnum.GTE,
+            value="2024-01-01",
+        ),
     ],
     limit=10,
 )
+
 sql, params = gen.generate(query)
+
 print("=== GTE Date Filter ===")
 print(f"SQL: {sql}")
 print(f"Params: {params}")
-assert isinstance(params["employees_hire_date_1"], date), f"Expected date, got {type(params['employees_hire_date_1'])}"
+
+assert len(params) == 1
+assert isinstance(next(iter(params.values())), date)
+
 print("PASS: hire_date is datetime.date\n")
+
 
 # Test: BETWEEN dates
 query2 = StructuredQuery(
     table="employees",
     columns=["*"],
     filters=[
-        FilterCondition(table="employees", field="hire_date", operator=OperatorEnum.BETWEEN, value=["2024-01-01", "2024-12-31"]),
+        FilterCondition(
+            table="employees",
+            field="hire_date",
+            operator=OperatorEnum.BETWEEN,
+            value=["2024-01-01", "2024-12-31"],
+        ),
     ],
     limit=50,
 )
+
 sql2, params2 = gen.generate(query2)
+
 print("=== BETWEEN Date Filter ===")
 print(f"SQL: {sql2}")
 print(f"Params: {params2}")
-assert isinstance(params2["employees_hire_date_1_1"], date)
-assert isinstance(params2["employees_hire_date_1_2"], date)
+
+assert len(params2) == 2
+assert all(isinstance(v, date) for v in params2.values())
+
 print("PASS: both BETWEEN values are datetime.date\n")
+
 
 # Test: IN with strings (should stay strings for name column)
 query3 = StructuredQuery(
     table="employees",
     columns=["*"],
     filters=[
-        FilterCondition(field="first_name", operator=OperatorEnum.IN, value=["Alice", "Bob"]),
+        FilterCondition(
+            field="first_name",
+            operator=OperatorEnum.IN,
+            value=["Alice", "Bob"],
+        ),
     ],
     limit=50,
 )
+
 sql3, params3 = gen.generate(query3)
+
 print("=== IN String Filter ===")
 print(f"SQL: {sql3}")
 print(f"Params: {params3}")
-assert isinstance(params3["first_name_1_0"], str)
+
+assert len(params3) == 2
+assert all(isinstance(v, str) for v in params3.values())
+assert set(params3.values()) == {"Alice", "Bob"}
+
 print("PASS: string values unchanged\n")
+
 
 # Test: Numeric filter
 query4 = StructuredQuery(
     table="departments",
     columns=["name", "budget"],
     filters=[
-        FilterCondition(field="budget", operator=OperatorEnum.GT, value="100000"),
+        FilterCondition(
+            field="budget",
+            operator=OperatorEnum.GT,
+            value="100000",
+        ),
     ],
     limit=50,
 )
+
 sql4, params4 = gen.generate(query4)
+
 print("=== Numeric Filter ===")
 print(f"SQL: {sql4}")
 print(f"Params: {params4}")
-assert isinstance(params4["budget_1"], float)
+
+assert len(params4) == 1
+assert isinstance(next(iter(params4.values())), float)
+assert next(iter(params4.values())) == 100000.0
+
 print("PASS: budget coerced to float\n")
 
 print("All end-to-end tests passed!")

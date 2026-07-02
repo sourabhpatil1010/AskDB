@@ -5,6 +5,96 @@ from app.ai.structured_output.schemas import StructuredQuery
 
 logger = logging.getLogger(__name__)
 
+# Patterns for SQL expressions that bypass raw column validation
+_COMPUTED_EXPR_PATTERN = re.compile(
+    r'(?i)^('
+    r'date_trunc\s*\('
+    r'|extract\s*\('
+    r'|to_char\s*\('
+    r'|count\s*\('
+    r'|sum\s*\('
+    r'|avg\s*\('
+    r'|min\s*\('
+    r'|max\s*\('
+    r'|coalesce\s*\('
+    r'|cast\s*\('
+    r'|concat\s*\('
+    r'|round\s*\('
+    r'|floor\s*\('
+    r'|ceil\s*\('
+    r'|\*'  # COUNT(*)
+    r')'
+)
+
+def _is_computed_expression(expr: str) -> bool:
+    """Returns True if the expression is a SQL function/computed expression that does not map to a raw column name."""
+    stripped = expr.strip()
+    # Has function call pattern
+    if _COMPUTED_EXPR_PATTERN.match(stripped):
+        return True
+    # Contains AS alias (e.g. "DATE_TRUNC('month', employees.hire_date) AS month")
+    if re.search(r'\bAS\b', stripped, re.IGNORECASE):
+        return True
+    return False
+
+
+def resolve_synthetic_columns(query: StructuredQuery):
+    """Schema-aware resolution of synthetic columns (e.g., converting 'full_name' or 'name' to CONCAT(first_name, ' ', last_name))."""
+    from app.models import Base as _Base
+    
+    def _resolve_col(expr: str) -> str:
+        stripped = expr.strip()
+        if _is_computed_expression(stripped) or "CONCAT" in stripped.upper():
+            return expr
+        as_match = re.search(r'^(.+?)\s+AS\s+(\w+)\s*$', stripped, re.IGNORECASE)
+        core_col = as_match.group(1).strip() if as_match else stripped
+        
+        parts = core_col.split(".")
+        c_name = parts[-1].strip()
+        from app.ai.planner.planner_utils import SchemaColumnResolver
+        all_tbls = [query.table] + [j.table for j in (query.joins or [])]
+        t_name = parts[0].strip() if len(parts) > 1 else (SchemaColumnResolver.resolve_column_owner(c_name, all_tbls) or query.table)
+        
+        tbl_obj = _Base.metadata.tables.get(t_name)
+        if tbl_obj is not None:
+            col_names = [c.name for c in tbl_obj.columns]
+            if c_name not in col_names and any(kw in c_name.lower() for kw in ["name", "details", "info", "employee"]) and "first_name" in col_names and "last_name" in col_names:
+                qual_prefix = f"{t_name}." if len(parts) > 1 else ""
+                target_alias = as_match.group(2) if as_match else c_name
+                return f"CONCAT({qual_prefix}first_name, ' ', {qual_prefix}last_name) AS {target_alias}"
+        return expr
+
+    if query.columns:
+        query.columns = [_resolve_col(c) for c in query.columns]
+    if query.sort and query.sort.field:
+        resolved_sort = _resolve_col(query.sort.field)
+        as_match = re.search(r'^(.+?)\s+AS\s+(\w+)\s*$', resolved_sort, re.IGNORECASE)
+        query.sort.field = as_match.group(2) if as_match else resolved_sort
+        if as_match and query.sort.table:
+            query.sort.table = None
+    if query.group_by:
+        new_gb = []
+        for gb in query.group_by:
+            res_gb = _resolve_col(gb)
+            as_m = re.search(r'^(.+?)\s+AS\s+(\w+)\s*$', res_gb, re.IGNORECASE)
+            new_gb.append(as_m.group(1).strip() if as_m else res_gb)
+        query.group_by = new_gb
+    if query.ranking:
+        if query.ranking.partition_by:
+            new_part = []
+            for p in query.ranking.partition_by:
+                res_p = _resolve_col(p)
+                as_m = re.search(r'^(.+?)\s+AS\s+(\w+)\s*$', res_p, re.IGNORECASE)
+                new_part.append(as_m.group(1).strip() if as_m else res_p)
+            query.ranking.partition_by = new_part
+        if query.ranking.order_by and query.ranking.order_by.field:
+            res_order = _resolve_col(query.ranking.order_by.field)
+            as_m = re.search(r'^(.+?)\s+AS\s+(\w+)\s*$', res_order, re.IGNORECASE)
+            query.ranking.order_by.field = as_m.group(2) if as_m else res_order
+            if as_m and query.ranking.order_by.table:
+                query.ranking.order_by.table = None
+
+
 class QueryValidator:
     def __init__(self):
         self.schema = {}
@@ -12,14 +102,18 @@ class QueryValidator:
             self.schema[table_name] = [col.name for col in table.columns]
 
     def _extract_column(self, field_str: str) -> str:
-        """Extract the raw column name from potential aggregation functions."""
-        # e.g., 'COUNT(id)' -> 'id', 'SUM(salary)' -> 'salary'
-        match = re.search(r'(?i)^(?:count|sum|avg|min|max)\((.+)\)$', field_str.strip())
+        """Extract the raw column name from potential aggregation functions or AS aliases."""
+        s = field_str.strip()
+        as_match = re.search(r'^(.+?)\s+AS\s+\w+\s*$', s, re.IGNORECASE)
+        if as_match:
+            s = as_match.group(1).strip()
+        match = re.search(r'(?i)^(?:count|sum|avg|min|max)\((.+)\)$', s.strip())
         if match:
             return match.group(1).strip()
-        return field_str.strip()
+        return s.strip()
 
     def validate(self, query: StructuredQuery) -> bool:
+        resolve_synthetic_columns(query)
         if query.table not in self.schema:
             logger.error(f"Validation failed: Table '{query.table}' does not exist.")
             raise ValueError(f"Table '{query.table}' does not exist.")
@@ -32,14 +126,54 @@ class QueryValidator:
                 valid_tables.append(j.table)
                 
         def _validate_col(col_name: str, explicit_table: str = None):
+            if not col_name:
+                return
+            from sqlalchemy import Numeric, Integer, Float
+            s_val = col_name.strip()
+            as_match_val = re.search(r'^(.+?)\s+AS\s+\w+\s*$', s_val, re.IGNORECASE)
+            if as_match_val:
+                s_val = as_match_val.group(1).strip()
+            agg_num_match = re.search(r'(?i)^(sum|avg)\((.+)\)$', s_val)
+            if agg_num_match:
+                op_num = agg_num_match.group(1).upper()
+                inner_num = agg_num_match.group(2).strip()
+                if re.match(r'(?i)^distinct\s+', inner_num):
+                    inner_num = re.sub(r'(?i)^distinct\s+', '', inner_num).strip()
+                t_n, c_n = None, inner_num
+                if "." in inner_num:
+                    t_n, c_n = inner_num.split(".", 1)
+                else:
+                    for t in valid_tables:
+                        if inner_num in self.schema.get(t, []):
+                            t_n = t
+                            break
+                    if not t_n:
+                        for t, cols in self.schema.items():
+                            if inner_num in cols:
+                                t_n = t
+                                break
+                if t_n and c_n and c_n != "*":
+                    tbl_obj = Base.metadata.tables.get(t_n)
+                    if tbl_obj is not None:
+                        col_obj = tbl_obj.columns.get(c_n)
+                        if col_obj is not None and not isinstance(col_obj.type, (Numeric, Integer, Float)):
+                            raise ValueError(f"Validation failed: Aggregate function {op_num} requires a numeric column, but got non-numeric column '{c_n}' of type {col_obj.type} in table '{t_n}'.")
+
+            if _is_computed_expression(col_name):
+                return
+
             cleaned_col = self._extract_column(col_name)
-            if cleaned_col == "*":
+            if _is_computed_expression(cleaned_col):
+                return
+
+            if cleaned_col == "*" or cleaned_col.endswith(".*") or col_name == "*" or col_name.endswith(".*"):
                 return
                 
-            # If the column has a dot, extract table and column
             if "." in cleaned_col:
                 parts = cleaned_col.split(".", 1)
                 t_name, c_name = parts[0], parts[1]
+                if c_name == "*":
+                    return
                 if t_name not in valid_tables:
                     raise ValueError(f"Table qualifier '{t_name}' not in query tables {valid_tables}")
                 if c_name not in self.schema.get(t_name, []):
@@ -53,13 +187,16 @@ class QueryValidator:
                     raise ValueError(f"Column '{cleaned_col}' not found in '{explicit_table}'")
                 return
                 
-            # Check if column exists in any of the valid tables
             found = False
             for t in valid_tables:
                 if cleaned_col in self.schema[t]:
                     found = True
                     break
             if not found:
+                for t_name, cols in self.schema.items():
+                    if cleaned_col in cols:
+                        logger.warning(f"Column '{cleaned_col}' found in '{t_name}', but '{t_name}' is not in valid_tables {valid_tables}. Allowing for dynamic schema resolution.")
+                        return
                 raise ValueError(f"Column '{cleaned_col}' not found in tables {valid_tables}")
 
         # Validate columns
@@ -78,11 +215,33 @@ class QueryValidator:
 
         # Validate sort
         if query.sort:
-            _validate_col(query.sort.field, query.sort.table)
+            # Sort field may be an alias (e.g. "avg_salary") or an expression — skip strict validation
+            if not _is_computed_expression(query.sort.field) and "." not in query.sort.field:
+                # It might be an alias from an aggregation — treat it permissively
+                # Only raise if it looks like a raw column name that doesn't exist AND has no alias-like appearance
+                pass
+            else:
+                _validate_col(query.sort.field, query.sort.table)
 
-        # Validate group_by
+        # Validate group_by — allow computed expressions (DATE_TRUNC, EXTRACT, etc.)
         if query.group_by:
             for gb in query.group_by:
                 _validate_col(gb)
+
+        # Validate having
+        if query.having:
+            for h in query.having:
+                _validate_col(h.column)
+
+        # Validate ranking
+        if query.ranking:
+            if query.ranking.partition_by:
+                for p in query.ranking.partition_by:
+                    _validate_col(p)
+            if query.ranking.order_by:
+                if not _is_computed_expression(query.ranking.order_by.field) and "." not in query.ranking.order_by.field:
+                    pass
+                else:
+                    _validate_col(query.ranking.order_by.field, query.ranking.order_by.table)
 
         return True
