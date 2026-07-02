@@ -28,6 +28,7 @@ When the Execution Plan specifies metrics, render them as aggregation expression
   MIN metric:    "MIN(table.column) AS alias"
 Use the exact alias from the Execution Plan (e.g., "avg_salary", "total_payroll", "count").
 NEVER use bare column names when the plan specifies aggregation.
+IMPORTANT: For ranking queries where metric operation is empty or none (e.g., Top 10 salaries, Highest salary employee), do NOT aggregate! Use unaggregated columns directly in columns without MAX() or MIN() (e.g. "payroll.base_salary AS base_salary", "employees.first_name", "employees.last_name"). Never use MAX() or MIN() when ranking individual rows.
 
 RULE 3 — TIME GRANULARITY IN GROUP BY:
 When the Execution Plan specifies time_granularity OR group_by contains "month", "week", "quarter", "year", "day":
@@ -41,6 +42,7 @@ When the Execution Plan specifies time_granularity OR group_by contains "month",
   - Example for "week" grouping on attendance:
       columns: ["DATE_TRUNC('week', attendance.date) AS week", "SUM(attendance.hours_worked) AS total_hours"]
       group_by: ["DATE_TRUNC('week', attendance.date)"]
+  - Never sort by the raw unaggregated date column when grouping by time! Set sort field to the time granularity alias (e.g. sort field: "month" or "quarter"), NOT the raw column.
   - Set time_granularity field to the granularity string: "month", "week", "quarter", "year", "day"
 
 RULE 4 — GROUPING BY NON-TIME COLUMNS:
@@ -51,14 +53,14 @@ For non-time grouping (department, office, etc.) use table.column format when jo
 RULE 5 — HAVING CLAUSES:
 When the Execution Plan specifies HAVING conditions (e.g., "departments with more than 20 employees"):
   Populate the "having" field as a list of objects:
-  {"column": "COUNT(employees.id)", "operator": ">", "value": 20}
-  {"column": "AVG(payroll.base_salary)", "operator": ">", "value": 100000}
+  {{"column": "COUNT(employees.id)", "operator": ">", "value": 20}}
+  {{"column": "AVG(payroll.base_salary)", "operator": ">", "value": 100000}}
   The "column" field must be the exact aggregation expression (same as in SELECT).
 
 RULE 6 — JOINS:
 Follow the Execution Plan "relationships" and "tables" to determine joins.
 Always use the ON clause with full table.column notation. No aliases.
-Example: {"table": "departments", "on": "employees.department_id = departments.id"}
+Example: {{"table": "departments", "on": "employees.department_id = departments.id"}}
 
 RULE 7 — FILTERS:
 Translate Execution Plan filters into the "filters" list.
@@ -76,19 +78,29 @@ Use the "Primary Keys" listed in the schema for each table.
 
 RULE 10 — NO HALLUCINATION:
 Only use columns and tables that appear in the schema above.
-Do not invent aliases, columns, or tables not in the schema.
+Do not invent aliases, columns, or tables not in the schema. If a table has "first_name" and "last_name", never invent synthetic columns like "full_name", "name", or "details". Use "first_name, last_name" or CONCAT(first_name, ' ', last_name) AS full_name. Everything must be schema-aware.
 
 RULE 11 — SORTING:
 For aggregation queries, sort by the aggregated metric alias (e.g., sort by "avg_salary" DESC).
 The "field" in sort must match an alias used in columns when sorting by aggregated values.
+When sorting by an alias or metric from SELECT, set "table" to null in the sort object. NEVER qualify aliases with a table name.
 
 RULE 12 — LIMIT DEFAULTS:
 Default limit is 50 unless the Execution Plan specifies a different value (e.g., Top 5 → limit: 5).
+
+RULE 13 — ADVANCED RANKING CONFIGURATION:
+When the Execution Plan or SQL Translation Hints specify ranking (e.g. Top-N per group, N-th rank, or Global ranking without aggregations), populate the optional "ranking" object:
+  - "type": "top", "bottom", or "nth"
+  - "rank": integer rank or limit requested (e.g. 10 for Top 10, 3 for Top 3 per department, 2 for second highest)
+  - "scope": "global" or "per_group"
+  - "partition_by": list of columns to partition by when scope is "per_group" (e.g. ["departments.name"])
+  - "order_by": sort object specifying table, field, and direction for ranking (e.g. {{"table": "payroll", "field": "base_salary", "direction": "desc"}})
+  - "dense_rank": boolean true if DENSE_RANK() or specific N-th rank should be used
 
 === USER QUESTION & EXECUTION PLAN ===
 {query}
 
 Generate the JSON query structure based ONLY on the schema and execution plan provided.
-Every aggregation from the plan must appear in columns. Every HAVING condition from the plan must appear in having.
+Every aggregation from the plan must appear in columns. Every HAVING condition from the plan must appear in having. Every ranking specification must appear in ranking.
 
 {format_instructions}

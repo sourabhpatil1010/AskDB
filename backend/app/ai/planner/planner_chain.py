@@ -2,11 +2,12 @@ import logging
 from pathlib import Path
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
-from tenacity import retry, wait_exponential, stop_after_attempt
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_not_exception_type
 
 from app.core.llm import get_llm
 from app.ai.planner.planner_schema import ExecutionPlan
 from app.models import Base
+from app.ai.planner.planner_utils import SYSTEM_TABLES
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,8 @@ class PlannerChain:
         # Format database schema info
         schema_lines = []
         for table_name, table in Base.metadata.tables.items():
+            if table_name in SYSTEM_TABLES:
+                continue
             col_strs = []
             for col in table.columns:
                 if hasattr(col.type, 'enums') and col.type.enums:
@@ -55,7 +58,7 @@ class PlannerChain:
             logger.error(f"Failed to read planner_prompt.txt from {prompt_path}: {e}")
             raise
 
-    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3))
+    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), retry=retry_if_not_exception_type((RuntimeError, AttributeError, ValueError)))
     async def generate_plan(self, natural_language: str) -> ExecutionPlan:
         """Invokes LangChain chat model to generate a Pydantic-parsed ExecutionPlan."""
         logger.info(f"Invoking PlannerChain for query: '{natural_language}'")

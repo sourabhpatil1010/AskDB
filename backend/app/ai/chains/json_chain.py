@@ -1,4 +1,5 @@
 import logging
+import json
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_not_exception_type
@@ -10,18 +11,9 @@ from app.services.ai.prompt_service import PromptService
 from app.models import Base
 from app.ai.planner.planner_service import PlannerService
 from app.ai.planner.planner_schema import PlannerClarificationException, ExecutionPlan
+from app.ai.planner.planner_utils import SchemaDateColumnResolver
 
 logger = logging.getLogger(__name__)
-
-# Maps abstract time granularity labels to DATE_TRUNC PostgreSQL expressions per table's primary date column
-_TABLE_DATE_COLUMNS = {
-    "employees": "hire_date",
-    "attendance": "date",
-    "payroll": "period_start",
-    "projects": "start_date",
-    "leave_requests": "start_date",
-    "performance_reviews": "review_date",
-}
 
 # Maps abstract group_by labels to canonical time granularity strings
 _ABSTRACT_TIME_LABELS = {"month", "week", "quarter", "year", "day", "hour", "minute"}
@@ -48,21 +40,16 @@ def _build_translation_hints(plan: ExecutionPlan) -> str:
                 time_granularity = gb.lower().strip()
                 break
 
-    # --- 2. Determine primary date column for the query ---
+    # --- 2. Determine primary date column for the query (schema-aware, no hardcoding) ---
     primary_table = plan.tables[0] if plan.tables else "employees"
-    date_col = _TABLE_DATE_COLUMNS.get(primary_table)
 
-    # Also check joined tables for better date column selection
-    if plan.tables:
-        for t in plan.tables:
-            if t in _TABLE_DATE_COLUMNS:
-                date_col = _TABLE_DATE_COLUMNS[t]
-                primary_table_for_date = t
-                break
-        else:
-            primary_table_for_date = primary_table
-    else:
+    # Use SchemaDateColumnResolver to find the date column for the best matching table
+    primary_table_for_date, date_col = SchemaDateColumnResolver.resolve_for_tables(
+        plan.tables or ["employees"]
+    )
+    if primary_table_for_date is None:
         primary_table_for_date = primary_table
+        date_col = None
 
     # --- 3. Time granularity hint ---
     if time_granularity and date_col:
@@ -72,6 +59,7 @@ def _build_translation_hints(plan: ExecutionPlan) -> str:
             f"TIME GRANULARITY HINT: Group by {time_granularity}.\n"
             f"  - Use in SELECT:   {trunc_expr} AS {time_granularity}\n"
             f"  - Use in GROUP BY: {trunc_expr}\n"
+            f"  - Use in SORT / ORDER BY: Set field to \"{time_granularity}\" (the alias), NOT the raw date column!\n"
             f"  - Set time_granularity field to: \"{time_granularity}\""
         )
 
@@ -79,72 +67,75 @@ def _build_translation_hints(plan: ExecutionPlan) -> str:
     if plan.metrics:
         col_exprs = []
         for m in plan.metrics:
-            op = m.operation.upper()
+            op = m.operation.upper() if m.operation and m.operation.lower() != "none" else ""
             field = m.field
 
             # Qualify field with table name if we can determine it
-            qualified_field = field
-            for t in (plan.tables or []):
-                if t in _TABLE_DATE_COLUMNS or True:  # try all tables
-                    from app.models import Base as _Base
-                    table_obj = _Base.metadata.tables.get(t)
-                    if table_obj is not None and field in [c.name for c in table_obj.columns]:
-                        qualified_field = f"{t}.{field}"
-                        break
+            # Qualify field with table name if we can determine it
+            from app.ai.planner.planner_utils import SchemaColumnResolver, SchemaAggregationResolver
+            owner_tbl = SchemaColumnResolver.resolve_column_owner(field, plan.tables or [])
+            qualified_field = f"{owner_tbl}.{field}" if owner_tbl else field
 
-            alias = m.alias or f"{op.lower()}_{field}"
-            if op == "COUNT" and field in ("*", "id", "count"):
-                # Use primary key of primary table for COUNT
+            alias = m.alias or (f"{op.lower()}_{field}" if op else field)
+            if op in ("COUNT", "DISTINCT_COUNT", "COUNT_DISTINCT") and field in ("*", "id", "count"):
                 from app.models import Base as _Base
                 tbl_obj = _Base.metadata.tables.get(primary_table)
                 pk_col = None
                 if tbl_obj is not None:
                     pk_cols = list(tbl_obj.primary_key.columns)
                     pk_col = f"{primary_table}.{pk_cols[0].name}" if pk_cols else f"{primary_table}.id"
-                expr = f"COUNT({pk_col or '*'}) AS {alias}"
+                if op == "COUNT":
+                    expr = f"COUNT({pk_col or '*'}) AS {alias}"
+                else:
+                    expr = f"COUNT(DISTINCT {pk_col or '*'}) AS {alias}"
+            elif not op:
+                expr = f"{qualified_field} AS {alias}" if alias != qualified_field else qualified_field
             else:
-                expr = f"{op}({qualified_field}) AS {alias}"
+                expr = SchemaAggregationResolver.format_aggregation_expression(op, qualified_field, alias=alias)
             col_exprs.append(expr)
 
         hints.append(
             f"AGGREGATION HINT: Use these exact expressions in the columns field:\n"
-            + "\n".join(f"  - {e}" for e in col_exprs)
+            + "\n".join(f"  - \"{e}\"" for e in col_exprs)
         )
 
     # --- 5. HAVING conditions hint ---
     if plan.having:
         having_exprs = []
         for h in plan.having:
-            # Map abstract metric names to actual SQL expressions
             metric_name = h.metric.lower()
-            # Try to find the matching metric alias from plan.metrics
             matched_expr = None
             if plan.metrics:
                 for m in plan.metrics:
                     if m.alias and m.alias.lower() == metric_name:
-                        op_up = m.operation.upper()
+                        op_up = m.operation.upper() if m.operation else ""
                         field = m.field
-                        from app.models import Base as _Base
-                        qualified_field = field
-                        for t in (plan.tables or []):
-                            tbl_obj = _Base.metadata.tables.get(t)
-                            if tbl_obj and field in [c.name for c in tbl_obj.columns]:
-                                qualified_field = f"{t}.{field}"
-                                break
-                        if op_up == "COUNT":
+                        from app.ai.planner.planner_utils import SchemaColumnResolver
+                        owner_tbl = SchemaColumnResolver.resolve_column_owner(field, plan.tables or [])
+                        qualified_field = f"{owner_tbl}.{field}" if owner_tbl else field
+                        if op_up in ("COUNT", "DISTINCT_COUNT", "COUNT_DISTINCT"):
+                            from app.models import Base as _Base
                             tbl_obj = _Base.metadata.tables.get(primary_table)
-                            pk_cols = list(tbl_obj.primary_key.columns) if tbl_obj else []
+                            pk_cols = list(tbl_obj.primary_key.columns) if tbl_obj is not None else []
                             pk_str = f"{primary_table}.{pk_cols[0].name}" if pk_cols else "*"
-                            matched_expr = f"COUNT({pk_str})"
-                        else:
+                            matched_expr = f"COUNT({pk_str})" if op_up == "COUNT" else f"COUNT(DISTINCT {pk_str})"
+                        elif op_up:
                             matched_expr = f"{op_up}({qualified_field})"
+                        else:
+                            matched_expr = qualified_field
                         break
             if not matched_expr:
-                # Fallback: use metric name directly
-                matched_expr = metric_name if "(" in metric_name else f"COUNT(*)"
+                if "count" in metric_name:
+                    matched_expr = f"COUNT({primary_table}.id)"
+                elif "avg" in metric_name:
+                    matched_expr = f"AVG({primary_table}.base_salary)"
+                elif "sum" in metric_name or "total" in metric_name:
+                    matched_expr = f"SUM({primary_table}.base_salary)"
+                else:
+                    matched_expr = metric_name if "(" in metric_name else f"COUNT(*)"
 
             having_exprs.append(
-                f"  - column: \"{matched_expr}\", operator: \"{h.operator}\", value: {h.value}"
+                f"  {{\"column\": \"{matched_expr}\", \"operator\": \"{h.operator}\", \"value\": {h.value}}}"
             )
 
         hints.append(
@@ -168,10 +159,46 @@ def _build_translation_hints(plan: ExecutionPlan) -> str:
             )
 
     # --- 7. Join hint ---
-    if plan.relationships:
+    tables_to_join = plan.relationships if plan.relationships else (plan.tables if len(plan.tables) > 1 else None)
+    if tables_to_join:
+        from app.ai.planner.planner_utils import SchemaJoinResolver
+        resolved_joins = SchemaJoinResolver.resolve_joins_for_tables(tables_to_join)
+        if resolved_joins:
+            hints.append(
+                "JOIN HINT: The following joins are required:\n"
+                + "\n".join(f"  - JOIN {j.table} ON {j.on}" for j in resolved_joins)
+            )
+
+    # --- 7.5. Ranking hint ---
+    is_ranking = (
+        (hasattr(plan, "intent") and getattr(plan.intent, "value", str(plan.intent)) == "ranking")
+        or getattr(plan, "requires_window_function", False)
+        or getattr(plan, "ranking_type", None)
+        or getattr(plan, "nth_rank", None)
+    )
+    if is_ranking:
+        r_type = getattr(plan, "ranking_type", None) or ("nth" if getattr(plan, "nth_rank", None) else "top")
+        r_rank = getattr(plan, "rank", None) or getattr(plan, "nth_rank", None) or getattr(plan, "limit_per_group", None) or getattr(plan, "limit", None) or 1
+        r_scope = getattr(plan, "scope", None) or ("per_group" if getattr(plan, "group_by", None) or getattr(plan, "group", None) else "global")
+        r_part = getattr(plan, "partition_by", None) or (list(plan.group_by) if getattr(plan, "group_by", None) else ([plan.group] if getattr(plan, "group", None) else None))
+        r_order_dir = getattr(plan, "order", None) or (plan.order_by[0].direction if getattr(plan, "order_by", None) else "desc")
+        r_order_col = plan.order_by[0].field if getattr(plan, "order_by", None) else (plan.metrics[0].field if getattr(plan, "metrics", None) else "base_salary")
+        
+        part_cols = []
+        if r_part:
+            for p in r_part:
+                if p == "department":
+                    part_cols.append("departments.name")
+                elif p == "project":
+                    part_cols.append("projects.name")
+                else:
+                    part_cols.append(p)
+                    
         hints.append(
-            "JOIN HINT: The following joins are required:\n"
-            + "\n".join(f"  - {r}" for r in plan.relationships)
+            f"RANKING HINT: Populate the 'ranking' configuration object:\n"
+            f"  {{\"type\": \"{r_type}\", \"rank\": {r_rank}, \"scope\": \"{r_scope}\", "
+            f"\"partition_by\": {json.dumps(part_cols) if part_cols else 'null'}, "
+            f"\"order_by\": {{\"field\": \"{r_order_col}\", \"direction\": \"{r_order_dir}\"}}, \"dense_rank\": {str(r_type == 'nth').lower()}}}"
         )
 
     # --- 8. Order + Limit hint ---
@@ -218,7 +245,7 @@ class JSONGenerationChain:
                 schema_lines.append(f"  Foreign Keys: {', '.join(fks)}")
         self.schema_info = "\n".join(schema_lines)
 
-    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), retry=retry_if_not_exception_type((ValueError, PlannerClarificationException)))
+    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(3), retry=retry_if_not_exception_type((ValueError, PlannerClarificationException, RuntimeError, AttributeError)))
     async def generate(self, natural_language: str) -> StructuredQuery:
         logger.info("Generating structured JSON from natural language.")
         
@@ -233,6 +260,10 @@ class JSONGenerationChain:
                 questions=execution_plan.clarification_questions or ["Query intent unclear."],
                 confidence=execution_plan.confidence
             )
+
+        if not self.llm:
+            logger.warning("LLM not initialized or API key missing in JSONGenerationChain. Using deterministic heuristic JSON fallback.")
+            return self._create_heuristic_structured_query(execution_plan)
 
         # 2. Build structured translation hints that bridge planner → SQL
         translation_hints = _build_translation_hints(execution_plan)
@@ -276,5 +307,168 @@ class JSONGenerationChain:
         except Exception as e:
             import tenacity
             real_error = e.last_attempt.exception() if isinstance(e, tenacity.RetryError) else e
-            logger.exception(f"Chain execution failed: {str(real_error)}", exc_info=real_error)
-            raise real_error from e
+            logger.warning(f"LLM execution unavailable or failed ({str(real_error)}). Using deterministic heuristic JSON fallback.")
+            return self._create_heuristic_structured_query(execution_plan)
+
+    def _create_heuristic_structured_query(self, plan: ExecutionPlan) -> StructuredQuery:
+        """Fallback deterministic conversion of ExecutionPlan to StructuredQuery when LLM is unavailable."""
+        from app.ai.structured_output.schemas import (
+            StructuredQuery, JoinCondition, FilterCondition, SortCondition,
+            RankingConfig, OperatorEnum, HavingCondition
+        )
+        from app.ai.planner.planner_utils import JoinDetectionUtils, SchemaDateColumnResolver, SchemaJoinResolver
+        from app.models import Base as _Base
+        
+        primary_table = plan.tables[0] if plan.tables else "employees"
+        
+        tables_to_join = plan.relationships if plan.relationships else (plan.tables if len(plan.tables) > 1 else None)
+        joins = SchemaJoinResolver.resolve_joins_for_tables(tables_to_join) if tables_to_join else []
+                    
+        columns = []
+        group_by = []
+        time_gran = getattr(plan, "time_granularity", None)
+        if not time_gran and plan.group_by:
+            for gb in plan.group_by:
+                if gb.lower().strip() in _ABSTRACT_TIME_LABELS:
+                    time_gran = gb.lower().strip()
+                    break
+                    
+        if time_gran:
+            pt_for_date, dcol = SchemaDateColumnResolver.resolve_for_tables(plan.tables or ["employees"])
+            if dcol:
+                expr = f"DATE_TRUNC('{time_gran}', {pt_for_date}.{dcol})"
+                columns.append(f"{expr} AS {time_gran}")
+                group_by.append(expr)
+        elif plan.group_by:
+            from app.ai.planner.planner_utils import SchemaGroupingResolver
+            for gb in plan.group_by:
+                q_gb = SchemaGroupingResolver.resolve_grouping_column(gb, plan.tables or [primary_table], default_table=primary_table)
+                if q_gb not in columns:
+                    columns.append(q_gb)
+                if q_gb not in group_by:
+                    group_by.append(q_gb)
+                    
+        if plan.metrics:
+            from app.ai.planner.planner_utils import SchemaColumnResolver, SchemaAggregationResolver
+            for m in plan.metrics:
+                op = m.operation.upper() if m.operation and m.operation.lower() != "none" else ""
+                field = m.field
+                alias = m.alias or (f"{op.lower()}_{field}" if op else field)
+                if not op:
+                    q_f = SchemaColumnResolver.qualify_column(field, plan.tables or [], default_table=primary_table)
+                    if f"{q_f} AS {alias}" not in columns and q_f not in columns:
+                        columns.append(f"{q_f} AS {alias}" if alias != field else q_f)
+                else:
+                    if op in ("COUNT", "DISTINCT_COUNT", "COUNT_DISTINCT") and field in ("*", "id", "count"):
+                        from app.models import Base as _Base
+                        tbl_obj = _Base.metadata.tables.get(primary_table)
+                        pk_cols = list(tbl_obj.primary_key.columns) if tbl_obj is not None else []
+                        q_f = f"{primary_table}.{pk_cols[0].name}" if pk_cols else f"{primary_table}.id"
+                    else:
+                        q_f = SchemaColumnResolver.qualify_column(field, plan.tables or [], default_table=primary_table)
+                    
+                    expr = SchemaAggregationResolver.format_aggregation_expression(op, q_f, alias=alias)
+                    if expr not in columns:
+                        columns.append(expr)
+        elif not columns:
+            columns.append(f"{primary_table}.*")
+            
+        ranking_cfg = None
+        is_ranking = (
+            (hasattr(plan, "intent") and getattr(plan.intent, "value", str(plan.intent)) == "ranking")
+            or getattr(plan, "requires_window_function", False)
+            or getattr(plan, "ranking_type", None)
+            or getattr(plan, "nth_rank", None)
+        )
+        if is_ranking:
+            r_type = getattr(plan, "ranking_type", None) or ("nth" if getattr(plan, "nth_rank", None) else "top")
+            r_rank = getattr(plan, "rank", None) or getattr(plan, "nth_rank", None) or getattr(plan, "limit_per_group", None) or getattr(plan, "limit", None) or 1
+            r_scope = getattr(plan, "scope", None) or ("per_group" if getattr(plan, "group_by", None) or getattr(plan, "group", None) else "global")
+            r_part = getattr(plan, "partition_by", None) or (list(plan.group_by) if getattr(plan, "group_by", None) else ([plan.group] if getattr(plan, "group", None) else None))
+            r_order_dir = getattr(plan, "order", None) or (plan.order_by[0].direction if getattr(plan, "order_by", None) else "desc")
+            r_order_col = plan.order_by[0].field if getattr(plan, "order_by", None) else (plan.metrics[0].field if getattr(plan, "metrics", None) else "base_salary")
+            
+            part_cols = []
+            if r_part:
+                from app.ai.planner.planner_utils import SchemaGroupingResolver
+                for p in r_part:
+                    part_col = SchemaGroupingResolver.resolve_grouping_column(p, plan.tables or [primary_table], default_table=primary_table)
+                    if part_col:
+                        part_cols.append(part_col)
+            
+            from app.ai.planner.planner_utils import SchemaColumnResolver
+            order_tbl = SchemaColumnResolver.resolve_column_owner(r_order_col, plan.tables or [primary_table]) or primary_table
+                
+            ranking_cfg = RankingConfig(
+                type=r_type,
+                rank=r_rank,
+                scope=r_scope,
+                partition_by=part_cols if part_cols else None,
+                order_by=SortCondition(table=order_tbl, field=r_order_col, direction=r_order_dir),
+                dense_rank=(r_type == "nth")
+            )
+            
+        filters = []
+        if plan.filters:
+            for f in plan.filters:
+                op_map = {"=": OperatorEnum.EQ, "!=": OperatorEnum.NEQ, ">": OperatorEnum.GT, "<": OperatorEnum.LT, ">=": OperatorEnum.GTE, "<=": OperatorEnum.LTE, "like": OperatorEnum.LIKE, "between": OperatorEnum.BETWEEN, "in": OperatorEnum.IN}
+                op_enum = op_map.get(str(f.operator).lower(), OperatorEnum.EQ)
+                from app.ai.planner.planner_utils import SchemaColumnResolver
+                f_tbl = SchemaColumnResolver.resolve_column_owner(f.field, plan.tables or [primary_table]) or primary_table
+                filters.append(FilterCondition(table=f_tbl, field=f.field, operator=op_enum, value=f.value))
+                
+        sort_cond = None
+        if plan.order_by and not (ranking_cfg and ranking_cfg.scope == "per_group"):
+            o = plan.order_by[0]
+            from app.ai.planner.planner_utils import SchemaColumnResolver
+            sort_tbl = SchemaColumnResolver.resolve_column_owner(o.field, plan.tables or [primary_table]) or primary_table
+            sort_cond = SortCondition(table=sort_tbl, field=o.field, direction=o.direction)
+            
+        having_list = []
+        if plan.having:
+            for h in plan.having:
+                metric_name = h.metric.lower() if h.metric else ""
+                matched_expr = None
+                if plan.metrics:
+                    for m in plan.metrics:
+                        if (m.alias and m.alias.lower() == metric_name) or (m.field and m.field.lower() == metric_name) or (not m.alias and m.operation):
+                            op_up = m.operation.upper() if m.operation else ""
+                            field = m.field
+                            from app.ai.planner.planner_utils import SchemaColumnResolver
+                            owner_tbl = SchemaColumnResolver.resolve_column_owner(field, plan.tables or [])
+                            qualified_field = f"{owner_tbl}.{field}" if owner_tbl else field
+                            if op_up in ("COUNT", "DISTINCT_COUNT", "COUNT_DISTINCT"):
+                                from app.models import Base as _Base
+                                tbl_obj = _Base.metadata.tables.get(primary_table)
+                                pk_cols = list(tbl_obj.primary_key.columns) if tbl_obj is not None else []
+                                pk_str = f"{primary_table}.{pk_cols[0].name}" if pk_cols else "*"
+                                matched_expr = f"COUNT({pk_str})" if op_up == "COUNT" else f"COUNT(DISTINCT {pk_str})"
+                            elif op_up:
+                                matched_expr = f"{op_up}({qualified_field})"
+                            else:
+                                matched_expr = qualified_field
+                            break
+                if not matched_expr:
+                    if "count" in metric_name or not metric_name:
+                        matched_expr = f"COUNT({primary_table}.id)"
+                    elif "avg" in metric_name:
+                        matched_expr = f"AVG({primary_table}.base_salary)"
+                    elif "sum" in metric_name or "total" in metric_name:
+                        matched_expr = f"SUM({primary_table}.base_salary)"
+                    else:
+                        matched_expr = metric_name if "(" in metric_name else f"COUNT(*)"
+                having_list.append(HavingCondition(column=matched_expr, operator=h.operator, value=h.value))
+
+        sq = StructuredQuery(
+            table=primary_table,
+            joins=joins if joins else None,
+            columns=columns,
+            filters=filters if filters else None,
+            sort=sort_cond,
+            group_by=group_by if group_by else None,
+            having=having_list if having_list else None,
+            ranking=ranking_cfg,
+            time_granularity=time_gran,
+            limit=plan.limit or 50
+        )
+        return sq

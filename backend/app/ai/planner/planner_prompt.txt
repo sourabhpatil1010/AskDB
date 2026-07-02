@@ -23,13 +23,15 @@ RESPONSIBILITIES & EXTRACTION RULES:
 1. INTENT: Identify the primary business intent from: [aggregation, comparison, ranking, trend_analysis, distribution, correlation, search, filtering, forecast].
 
 2. ENTITY EXTRACTION: Identify required tables from the schema above, required columns, primary entity, and secondary entity.
+   IMPORTANT: If a table has "first_name" and "last_name", never invent synthetic columns like "full_name" or "name". Use "first_name, last_name" or CONCAT. Everything must be schema-aware.
 
 3. METRIC EXTRACTION: Recognize operations: COUNT, SUM, AVG, MIN, MAX, DISTINCT COUNT, MEDIAN. Include an alias (e.g., "avg_salary", "count", "total_payroll").
+   IMPORTANT: For ranking queries (e.g., Top 10 salaries, Highest salary employee, Lowest salary employee), do NOT use MAX() or MIN() aggregation! Set operation to empty string "" or "none".
    IMPORTANT: For "salary" queries, note that salary is in the "payroll" table as "base_salary", not in "employees".
 
 4. TIME REASONING: Convert relative or natural time expressions into structured filters:
-   - "This Year" -> BETWEEN ['{year}-01-01', '{year}-12-31']
-   - "Last Year" -> BETWEEN ['{year-1}-01-01', '{year-1}-12-31']
+   - "This Year" -> BETWEEN ['{{year}}-01-01', '{{year}}-12-31']
+   - "Last Year" -> BETWEEN ['{{year-1}}-01-01', '{{year-1}}-12-31']
    - "This Month", "Last Month", "This Quarter", "Last Quarter"
    - "Before COVID" -> < '2020-03-01'
    - "After COVID" -> > '2020-01-01'
@@ -50,12 +52,13 @@ RESPONSIBILITIES & EXTRACTION RULES:
 
 7. GROUPING & HAVING:
    - Identify GROUP BY columns (e.g., department, month, year, project).
-   - Recognize HAVING clauses like "Departments with more than 20 employees" -> having: [{metric: "count", operator: ">", value: 20}]
-   - "Average salary above 100000" -> having: [{metric: "avg_salary", operator: ">", value: 100000}]
+   - Recognize HAVING clauses like "Departments with more than 20 employees" -> having: [{{metric: "count", operator: ">", value: 20}}]
+   - "Average salary above 100000" -> having: [{{metric: "avg_salary", operator: ">", value: 100000}}]
    - The "metric" field in having must match the alias of a metric in the metrics list.
 
 8. SORTING & LIMIT: Recognize words like Highest, Lowest, Top 5, First 20, Ascending, Descending.
-   For ranking queries (Top N), set limit to N and order_by to descending by the primary metric.
+   For ranking queries (Top N or Highest/Lowest individual records like Top 10 salaries or Highest salary employee), set intent to "ranking", set limit (default to 1 if no number specified), set order_by direction ("desc" for highest/top, "asc" for lowest/bottom), and set metric operation to empty string "" (do NOT use max/min aggregation).
+   Never sort by unaggregated date columns when grouping by time; use the time granularity alias.
 
 9. JOIN DETECTION: Automatically determine required joins and relationships across primary keys and foreign keys.
    Example: Salary by Department requires: payroll -> employees -> departments.
@@ -66,6 +69,18 @@ RESPONSIBILITIES & EXTRACTION RULES:
 11. QUERY DECOMPOSITION: Break complex queries into sequential logical tasks.
     Example: "Compare average salary of employees hired after COVID across departments excluding interns with more than 20 employees."
     Task 1: hire_date > 2020-01-01 -> Task 2: Exclude Interns -> Task 3: AVG(base_salary) AS avg_salary -> Task 4: Group By department -> Task 5: HAVING COUNT > 20 -> Task 6: Sort Desc.
+
+12. ADVANCED RANKING SEMANTICS & CAPABILITIES DETECTION:
+    You MUST distinguish Aggregation (Average salary, Maximum salary across all departments, Employee count) from Ranking (Top 10 salaries, Highest salary employee, Lowest salary employee, Employee earning the most, Employee with maximum salary, Top salary employee, Second highest salary, Top 3 salaries per department).
+    Ranking is NOT aggregation. When a query asks for individual records or entities ranked by a metric (e.g. Employee with maximum salary, Employee earning the most, Top salary employee), set operation to empty string "" or "none". MAX(), MIN(), AVG(), COUNT() must never be confused with ORDER BY, LIMIT, ROW_NUMBER(), DENSE_RANK().
+    For ANY ranking query, set intent: "ranking", set metric operation to empty string "" (never use MAX or MIN), and populate these fields:
+    - For Global Ranking (e.g., "Top 10 salaries", "Highest salary employee", "Lowest salary employee", "Employee earning the most", "Employee with maximum salary", "Top salary employee"):
+      Set ranking_type: "top" (for highest/best/latest/most/maximum) or "bottom" (for lowest/worst/oldest/least/minimum), rank: N (default 1 if singular like 'Highest'), scope: "global", order: "desc" (or "asc" for lowest/oldest).
+    - For N-th Rank queries (e.g., "Second highest salary", "Third highest salary", "5th highest salary", "Second lowest attendance"):
+      Set ranking_type: "nth", rank: N (2 for second, 3 for third, 5 for 5th), nth_rank: N, scope: "global", order: "desc" (or "asc" for lowest), requires_window_function: true.
+    - For Ranking Within Groups / Top-N per group (e.g., "Highest salary employee in each department", "Top 3 salaries per department", "Latest employee in every department", "Best employee in every department", "Latest payroll for each employee", "Top performer in each team", "Second highest salary per department"):
+      Set ranking_type: "top" or "bottom" (or "nth" if N-th rank like second highest is requested), rank: N (e.g., 1 for 'Highest/Latest/Best', 2 for 'Second highest', or 3 for 'Top 3'), limit_per_group: N, scope: "per_group", group: "department" (or entity being grouped by), partition_by: ["department"] (or relevant grouping entity), order: "desc" (or "asc"), requires_window_function: true, requires_partition_ranking: true.
+    Do NOT reject or fail during planning; output the full Execution Plan with these structured ranking attributes and boolean flags set.
 
 USER QUESTION:
 {query}

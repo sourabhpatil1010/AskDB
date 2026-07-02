@@ -30,16 +30,26 @@ class FilterCondition(BaseModel):
 
 
 class SortCondition(BaseModel):
-    table: Optional[str] = Field(default=None, description="The table this field belongs to")
-    field: str = Field(description="The column name or expression to sort by")
+    table: Optional[str] = Field(default=None, description="The table this field belongs to. Leave None/null if sorting by an alias or metric from SELECT (e.g. 'avg_salary', 'count', 'month', 'quarter').")
+    field: str = Field(description="The column name, alias, or expression to sort by")
     direction: str = Field(description="Sort direction, either 'asc' or 'desc'")
 
 
 class HavingCondition(BaseModel):
     """Represents a HAVING clause condition applied to an aggregated column or expression."""
-    column: str = Field(description="The aggregated expression to check, e.g. 'COUNT(employees.id)', 'AVG(payroll.base_salary)'")
+    column: str = Field(description="The aggregated expression to check, e.g. 'COUNT(employees.id)', 'AVG(payroll.base_salary)'. Must be the full aggregate expression, never a bare SELECT alias.")
     operator: str = Field(description="The comparison operator: >, <, >=, <=, =, !=")
     value: float | int = Field(description="The numeric threshold value to compare against")
+
+
+class RankingConfig(BaseModel):
+    """Configuration for advanced SQL ranking operations (Global, N-th, or Grouped/Partitioned)."""
+    type: str = Field(description="Ranking type: 'top', 'bottom', or 'nth'")
+    rank: int = Field(description="The numeric rank or Top-N limit, e.g. 3 for Top 3, 2 for second highest")
+    scope: str = Field(default="global", description="Ranking scope: 'global' or 'per_group'")
+    partition_by: Optional[List[str]] = Field(default=None, description="List of columns or expressions to PARTITION BY in window function, e.g. ['departments.name']")
+    order_by: Optional[SortCondition] = Field(default=None, description="The column and direction to order by when computing ranks")
+    dense_rank: bool = Field(default=False, description="True if DENSE_RANK() or N-th rank should be used")
 
 
 class StructuredQuery(BaseModel):
@@ -62,6 +72,7 @@ class StructuredQuery(BaseModel):
         "HAVING clause conditions on aggregated results. "
         "Example: COUNT(employees.id) > 20, AVG(payroll.base_salary) > 100000"
     ))
+    ranking: Optional[RankingConfig] = Field(default=None, description="Advanced ranking configuration for window function or N-th rank queries")
     time_granularity: Optional[str] = Field(default=None, description=(
         "The time bucket granularity for grouping: 'day', 'week', 'month', 'quarter', 'year'. "
         "Set this when the planner specifies time-based grouping."

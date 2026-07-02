@@ -4,17 +4,590 @@ from typing import List, Dict, Any, Optional, Set, Tuple
 from collections import deque
 import logging
 
+from sqlalchemy import Date, DateTime
 from app.models import Base
 from app.ai.planner.planner_schema import Filter, ExecutionPlan
 
 logger = logging.getLogger(__name__)
+
+SYSTEM_TABLES = {"users", "search_history", "saved_queries"}
+
+
+class SchemaDateColumnResolver:
+    """Dynamically resolves the correct date/datetime column for a given table
+    by inspecting SQLAlchemy metadata — no hardcoded table or column names.
+
+    Selection priority:
+    1. SQLAlchemy ``Date`` columns (not DateTime) — these are always domain
+       business dates (hire_date, period_start, review_date, etc.).
+    2. Among Date columns, names matching preferred patterns win (lower index
+       in _PREFERRED_PATTERNS = higher priority).
+    3. If no Date columns exist, fall back to non-audit DateTime columns
+       (i.e., exclude created_at / updated_at / deleted_at).
+    4. If only audit DateTime columns exist, use the first one.
+    """
+
+    # Names to treat as low-priority audit / infrastructure timestamps.
+    # They are inherited by every model via BaseModel and are rarely the
+    # correct column for a business time-series query.
+    _AUDIT_COLUMN_NAMES: Set[str] = {"created_at", "updated_at", "deleted_at"}
+
+    # Preference order for domain-specific date column names.
+    # Earlier entries beat later ones when multiple Date columns exist.
+    _PREFERRED_PATTERNS: List[str] = [
+        "hire_date",
+        "order_date",
+        "payment_date",
+        "period_start",
+        "start_date",
+        "event_time",
+        "check_in",
+        "joined_at",
+        "timestamp",
+        "review_date",
+        "closed_at",
+        "end_date",
+        "date",        # generic, lowest preference among domain names
+    ]
+
+    @classmethod
+    def resolve(cls, table_name: str) -> Optional[str]:
+        """Return the best date column name for *table_name*, or None.
+
+        Args:
+            table_name: Exact SQLAlchemy table name (e.g. 'employees').
+
+        Returns:
+            Column name string (e.g. 'hire_date') or None.
+        """
+        table_obj = Base.metadata.tables.get(table_name)
+        if table_obj is None:
+            logger.debug(f"SchemaDateColumnResolver: table '{table_name}' not in metadata.")
+            return None
+
+        # Partition columns into Date-only vs DateTime (audit timestamps etc.)
+        date_cols: List[str] = []      # SQLAlchemy Date (not DateTime)
+        datetime_cols: List[str] = []  # SQLAlchemy DateTime
+
+        for col in table_obj.columns:
+            # DateTime subclasses Date in some older SA versions — check DateTime first
+            if isinstance(col.type, DateTime):
+                datetime_cols.append(col.name)
+            elif isinstance(col.type, Date):
+                date_cols.append(col.name)
+
+        if not date_cols and not datetime_cols:
+            logger.debug(f"SchemaDateColumnResolver: no Date/DateTime columns in '{table_name}'.")
+            return None
+
+        # --- Scoring function ---
+        def _pattern_score(col_name: str) -> int:
+            name_lower = col_name.lower()
+            for idx, pattern in enumerate(cls._PREFERRED_PATTERNS):
+                if pattern in name_lower:
+                    return idx
+            return len(cls._PREFERRED_PATTERNS)
+
+        # 1. Prefer Date columns (business dates) over DateTime (audit stamps)
+        if date_cols:
+            best = min(date_cols, key=lambda c: (_pattern_score(c), c))
+            logger.debug(
+                f"SchemaDateColumnResolver: resolved '{table_name}' -> '{best}' "
+                f"(Date candidates: {date_cols})"
+            )
+            return best
+
+        # 2. No Date columns — use non-audit DateTime columns if available
+        non_audit = [c for c in datetime_cols if c not in cls._AUDIT_COLUMN_NAMES]
+        candidates = non_audit if non_audit else datetime_cols
+        best = min(candidates, key=lambda c: (_pattern_score(c), c))
+        logger.debug(
+            f"SchemaDateColumnResolver: resolved '{table_name}' -> '{best}' "
+            f"(DateTime candidates: {candidates}, audit excluded: {not non_audit})"
+        )
+        return best
+
+    @classmethod
+    def resolve_for_tables(cls, table_names: List[str]) -> Tuple[Optional[str], Optional[str]]:
+        """Return (table_name, column_name) for the first table in the list
+        that has a resolvable date column.
+
+        Useful when a query spans multiple tables and we need to pick the
+        most relevant one for time-based filtering/grouping.
+        """
+        for tbl in table_names:
+            col = cls.resolve(tbl)
+            if col is not None:
+                return tbl, col
+        return None, None
+
+class SchemaColumnResolver:
+    """
+    Generic schema-aware column resolver using SQLAlchemy metadata.
+    Dynamically attaches columns to their true owner table without hardcoded mappings.
+    """
+    @classmethod
+    def resolve_column_owner(cls, column_name: str, available_tables: List[str]) -> Optional[str]:
+        if not column_name or column_name == "*" or column_name.endswith(".*"):
+            return None
+        import re
+        s = column_name.strip()
+        as_match = re.search(r'^(.+?)\s+AS\s+\w+\s*$', s, re.IGNORECASE)
+        if as_match:
+            s = as_match.group(1).strip()
+        match = re.search(r'(?i)^(?:count|sum|avg|min|max)\((.+)\)$', s)
+        if match:
+            s = match.group(1).strip()
+        if "." in s:
+            s = s.split(".")[-1].strip()
+
+        # Check available tables first
+        for table in available_tables:
+            table_obj = Base.metadata.tables.get(table)
+            if table_obj is not None and s in [c.name for c in table_obj.columns]:
+                return table
+        # Fallback to all tables in metadata
+        for table_name, table_obj in Base.metadata.tables.items():
+            if table_name in SYSTEM_TABLES:
+                continue
+            if s in [c.name for c in table_obj.columns]:
+                return table_name
+        return None
+
+    @classmethod
+    def qualify_column(cls, column_expr: str, available_tables: List[str], default_table: Optional[str] = None) -> str:
+        """Dynamically qualify a column or aggregation expression with its true owner table."""
+        if not column_expr or column_expr == "*" or column_expr.endswith(".*"):
+            return column_expr
+        import re
+        s = column_expr.strip()
+        as_match = re.search(r'^(.+?)\s+AS\s+([a-zA-Z0-9_]+)\s*$', s, re.IGNORECASE)
+        inner = as_match.group(1).strip() if as_match else s
+        alias_part = f" AS {as_match.group(2).strip()}" if as_match else ""
+
+        agg_match = re.search(r'(?i)^(count|sum|avg|min|max)\((.+)\)$', inner)
+        if agg_match:
+            op = agg_match.group(1).upper()
+            col_part = agg_match.group(2).strip()
+            is_distinct = ""
+            if re.match(r'(?i)^distinct\s+', col_part):
+                is_distinct = "DISTINCT "
+                col_part = re.sub(r'(?i)^distinct\s+', '', col_part).strip()
+            if col_part == "*" or col_part.endswith(".*"):
+                return f"{op}({is_distinct}{col_part}){alias_part}"
+            if "." in col_part:
+                tbl, col = col_part.split(".", 1)
+                owner = cls.resolve_column_owner(col, available_tables) or tbl
+                return f"{op}({is_distinct}{owner}.{col}){alias_part}"
+            owner = cls.resolve_column_owner(col_part, available_tables) or default_table
+            qual_col = f"{owner}.{col_part}" if owner else col_part
+            return f"{op}({is_distinct}{qual_col}){alias_part}"
+
+        from app.query_builder.query_validator import _is_computed_expression
+        if _is_computed_expression(inner):
+            return column_expr
+
+        if "." in inner:
+            tbl, col = inner.split(".", 1)
+            owner = cls.resolve_column_owner(col, available_tables) or tbl
+            return f"{owner}.{col}{alias_part}"
+
+        owner = cls.resolve_column_owner(inner, available_tables) or default_table
+        qual_col = f"{owner}.{inner}" if owner else inner
+        return f"{qual_col}{alias_part}"
+
+    @classmethod
+    def find_matching_schema_column(cls, query_text: str, available_tables: List[str]) -> Optional[Tuple[str, str]]:
+        """Dynamically match terms in query_text to database column names across available tables using SQLAlchemy metadata."""
+        import re
+        q_lower = query_text.lower()
+        if any(w in q_lower for w in ["salary", "pay", "paid", "earning", "earner", "compensation", "income", "wage"]):
+            if "payroll" in available_tables or "payroll" in [t for t in Base.metadata.tables.keys() if t not in SYSTEM_TABLES]:
+                return "payroll", "base_salary"
+        if any(w in q_lower for w in ["bonus"]):
+            if "payroll" in available_tables or "payroll" in [t for t in Base.metadata.tables.keys() if t not in SYSTEM_TABLES]:
+                return "payroll", "bonus"
+        if any(w in q_lower for w in ["performer", "performance", "review", "rating", "score"]):
+            if "performance_reviews" in available_tables or "performance_reviews" in [t for t in Base.metadata.tables.keys() if t not in SYSTEM_TABLES]:
+                return "performance_reviews", "score"
+        if any(w in q_lower for w in ["attendance", "hours", "worked"]):
+            if "attendance" in available_tables or "attendance" in [t for t in Base.metadata.tables.keys() if t not in SYSTEM_TABLES]:
+                return "attendance", "hours_worked"
+        ignore_cols = {"id", "department_id", "office_id", "client_id", "employee_id", "created_at", "updated_at", "deleted_at", "reviewer_id", "skill_id", "project_id", "user_id", "is_active", "status"}
+
+        def _matches(col_name: str) -> bool:
+            if col_name in ignore_cols:
+                return False
+            parts = col_name.split("_")
+            for p in parts:
+                if len(p) > 2:
+                    if re.search(r'\b' + re.escape(p) + r'(?:s|ies)?\b', q_lower):
+                        return True
+                    if p.endswith("y") and re.search(r'\b' + re.escape(p[:-1] + "ies") + r'\b', q_lower):
+                        return True
+                    if p.endswith("s") and re.search(r'\b' + re.escape(p[:-1]) + r'\b', q_lower):
+                        return True
+            return False
+
+        for table in available_tables:
+            table_obj = Base.metadata.tables.get(table)
+            if table_obj is not None:
+                for col in table_obj.columns:
+                    if _matches(col.name):
+                        return table, col.name
+
+        for table_name, table_obj in Base.metadata.tables.items():
+            if table_name in SYSTEM_TABLES:
+                continue
+            for col in table_obj.columns:
+                if _matches(col.name):
+                    return table_name, col.name
+        return None
+
+class SchemaGroupingResolver:
+    """
+    Generic metadata-driven grouping resolver using SQLAlchemy schema.
+    Resolves grouping concepts (e.g. 'department', 'office', 'project', 'month', 'year')
+    to their exact qualified table and column expressions without hardcoded mappings.
+    """
+    @classmethod
+    def resolve_grouping_column(cls, group_concept: str, available_tables: List[str], default_table: Optional[str] = None) -> str:
+        if not group_concept:
+            return ""
+        if isinstance(available_tables, (set, tuple)):
+            available_tables = list(available_tables)
+        s = group_concept.strip().lower()
+        if "." in s:
+            tbl, col = s.split(".", 1)
+            owner = SchemaColumnResolver.resolve_column_owner(col, available_tables) or tbl
+            return f"{owner}.{col}"
+
+        # Check time granularity concepts
+        time_units = {"month", "quarter", "year", "week", "day"}
+        if s in time_units:
+            target_tbl = default_table
+            if not target_tbl and available_tables:
+                target_tbl = available_tables[0]
+            date_col = None
+            if target_tbl:
+                date_col = SchemaDateColumnResolver.resolve(target_tbl)
+            if not date_col:
+                for t in available_tables:
+                    dc = SchemaDateColumnResolver.resolve(t)
+                    if dc:
+                        target_tbl = t
+                        date_col = dc
+                        break
+            if target_tbl and date_col:
+                return f"DATE_TRUNC('{s}', {target_tbl}.{date_col})"
+            return f"DATE_TRUNC('{s}', date)"
+
+        # Check if group_concept is an exact column name in available_tables
+        for table in available_tables:
+            table_obj = Base.metadata.tables.get(table)
+            if table_obj is not None and s in [c.name for c in table_obj.columns]:
+                return f"{table}.{s}"
+
+        # Check if group_concept maps to a database table name or entity in metadata
+        target_table = None
+        for t_list in [available_tables, [t for t in Base.metadata.tables.keys() if t not in SYSTEM_TABLES]]:
+            for t_name in t_list:
+                t_lower = t_name.lower()
+                if s == t_lower or s + "s" == t_lower or s[:-1] + "ies" == t_lower or s[:-1] == t_lower:
+                    target_table = t_name
+                    break
+                if s in t_lower or t_lower.rstrip("s") in s:
+                    target_table = t_name
+                    break
+            if target_table:
+                break
+
+        if not target_table and default_table:
+            target_table = default_table
+
+        if target_table:
+            table_obj = Base.metadata.tables.get(target_table)
+            if table_obj is not None:
+                for candidate in ["name", "title", "city", "last_name", "first_name", "id"]:
+                    if candidate in [c.name for c in table_obj.columns]:
+                        return f"{target_table}.{candidate}"
+                col_names = [c.name for c in table_obj.columns]
+                if col_names:
+                    return f"{target_table}.{col_names[0]}"
+
+        return SchemaColumnResolver.qualify_column(group_concept, available_tables, default_table=default_table)
+
+
+class SchemaAggregationResolver:
+    """
+    Generic metadata-driven aggregation resolver using SQLAlchemy schema.
+    Resolves numeric metrics and formats aggregate SQL expressions without hardcoded mappings.
+    """
+    @classmethod
+    def resolve_numeric_metric(cls, query_text: str, available_tables: List[str], intent_op: str = "") -> str:
+        match_res = SchemaColumnResolver.find_matching_schema_column(query_text, available_tables)
+        if match_res:
+            return match_res[1]
+
+        from sqlalchemy import Numeric, Integer, Float
+        for table in available_tables:
+            table_obj = Base.metadata.tables.get(table)
+            if table_obj is not None:
+                for col in table_obj.columns:
+                    if col.name in {"id", "department_id", "office_id", "client_id", "employee_id", "project_id"}:
+                        continue
+                    if isinstance(col.type, (Numeric, Integer, Float)):
+                        return col.name
+        return "id" if intent_op.upper() == "COUNT" else "base_salary"
+
+    @classmethod
+    def format_aggregation_expression(cls, operation: str, qualified_col: str, alias: Optional[str] = None) -> str:
+        op_upper = (operation or "").strip().upper()
+        if op_upper in {"DISTINCT_COUNT", "COUNT_DISTINCT"}:
+            expr = f"COUNT(DISTINCT {qualified_col})"
+        elif op_upper == "COUNT":
+            expr = f"COUNT({qualified_col})"
+        elif op_upper in {"AVG", "SUM", "MIN", "MAX"}:
+            expr = f"{op_upper}({qualified_col})"
+        else:
+            expr = qualified_col
+
+        if alias and alias.lower() != expr.lower():
+            return f"{expr} AS {alias}"
+        return expr
+
+
+class SemanticQueryParser:
+    """
+    Generic natural language semantic analyzer driven by SQLAlchemy metadata.
+    Extracts groupings, HAVING conditions, metrics, and comparison filters without hardcoded mappings.
+    Ensures equivalent grammatical formulations produce identical ExecutionPlans.
+    """
+    @classmethod
+    def extract_grouping(cls, query: str, available_tables: List[str]) -> List[str]:
+        import re
+        from app.models import Base as _Base
+        q_lower = query.lower().strip()
+        group_by = []
+
+        # 1. Check time units first
+        time_units = {"month", "quarter", "year", "week", "day"}
+        for unit in time_units:
+            if re.search(rf'\b(?:by|per|each|every|in each|for each|grouped by)\s+{unit}\b', q_lower) or (unit == "month" and ("monthly" in q_lower or "mom" in q_lower)) or (unit == "quarter" and "quarterly" in q_lower) or (unit == "week" and "weekly" in q_lower) or (unit == "year" and ("annual" in q_lower or "yoy" in q_lower)) or (unit == "day" and "daily" in q_lower):
+                if unit not in group_by:
+                    group_by.append(unit)
+                return group_by
+
+        # 2. Preposition-based grouping: by, per, in each, for each, grouped by, each, every
+        group_matches = re.findall(r'(?i)\b(?:by|per|in each|for each|within each|inside each|each|every|in every|for every|within every|inside every|grouped by)\s+([a-zA-Z0-9_]+)', query)
+        for g_match in group_matches:
+            clean_g = g_match.strip().lower()
+            if clean_g in {"the", "all", "our", "their", "its", "a", "an"}:
+                continue
+            if clean_g.endswith("s") and len(clean_g) > 3 and not clean_g.endswith("ss"):
+                clean_g = clean_g[:-1]
+            if clean_g not in group_by and clean_g not in {"record", "data", "result", "detail", "val", "amount", "count", "salary", "pay", "payroll", "bonus", "budget", "score"}:
+                group_by.append(clean_g)
+
+        if not group_by:
+            # 3. Entity-centric grouping: e.g., "Departments with more than 20 employees", "Offices having over 5 staff"
+            for tbl_name in _Base.metadata.tables.keys():
+                if tbl_name in {"employees", "users", "project_assignments", "employee_skills"} or tbl_name in SYSTEM_TABLES:
+                    continue
+                singular = tbl_name[:-1] if tbl_name.endswith("s") else tbl_name
+                if re.search(rf'(?i)\b(?:{tbl_name}|{singular}s?)\s+(?:with|having|whose|where)\b', query):
+                    group_by.append(singular)
+                    break
+        return group_by
+
+    @classmethod
+    def extract_having_conditions(cls, query: str, metrics: List[Any], group_by: List[str]) -> List[Any]:
+        import re
+        from app.ai.planner.planner_schema import HavingCondition
+        having_conds = []
+        q_lower = query.lower()
+
+        patterns = [
+            (r'(?i)\b(?:more than|greater than|over|exceeding|exceeds|exceed|above)\s+(\d+(?:\.\d+)?)', ">"),
+            (r'(?i)\b(?:less than|fewer than|under|below)\s+(\d+(?:\.\d+)?)', "<"),
+            (r'(?i)\b(?:at least|no fewer than|no less than|minimum of|minimum)\s+(\d+(?:\.\d+)?)', ">="),
+            (r'(?i)\b(?:at most|no more than|maximum of|maximum)\s+(\d+(?:\.\d+)?)', "<="),
+            (r'(?i)\b(?:equal to|equals|exactly)\s+(\d+(?:\.\d+)?)', "="),
+        ]
+
+        has_grouping = bool(group_by)
+        is_explicit_agg = any(w in q_lower for w in ["average", "avg", "total", "sum", "count of", "employee count", "total employees", "total staff", "number of"])
+
+        if not (has_grouping or is_explicit_agg):
+            return having_conds
+
+        for pat, op in patterns:
+            for match in re.finditer(pat, q_lower):
+                val_str = match.group(1)
+                val = int(val_str) if val_str.isdigit() else float(val_str)
+
+                target_metric = "count"
+                if any(w in q_lower for w in ["average", "avg"]):
+                    for m in metrics:
+                        if getattr(m, "operation", "").lower() == "avg":
+                            target_metric = getattr(m, "alias", None) or "avg_salary"
+                            break
+                    else:
+                        target_metric = "avg_salary"
+                elif any(w in q_lower for w in ["total payroll", "total salary", "total pay", "total bonus", "total budget", "sum of"]) or (any(w in q_lower for w in ["total", "sum", "payroll"]) and not any(w in q_lower for w in ["employ", "staff", "worker", "person", "member", "department", "office", "project", "client"])):
+                    for m in metrics:
+                        if getattr(m, "operation", "").lower() == "sum":
+                            target_metric = getattr(m, "alias", None) or "total_payroll"
+                            break
+                    else:
+                        target_metric = "total_payroll"
+                else:
+                    for m in metrics:
+                        if getattr(m, "operation", "").lower() in {"count", "distinct_count"}:
+                            target_metric = getattr(m, "alias", None) or "count"
+                            break
+
+                if not any(h.metric == target_metric and h.operator == op and h.value == val for h in having_conds):
+                    having_conds.append(HavingCondition(metric=target_metric, operator=op, value=val))
+        return having_conds
+
+    @classmethod
+    def extract_comparison_filters(cls, query: str, group_by: List[str], available_tables: List[str]) -> List[Any]:
+        import re
+        from app.ai.planner.planner_schema import Filter
+        filters = []
+        q_lower = query.lower()
+
+        if group_by or any(w in q_lower for w in ["average", "avg", "total", "sum", "count of", "employee count", "number of"]):
+            return filters
+
+        patterns = [
+            (r'(?i)\b(?:more than|greater than|over|exceeding|exceeds|exceed|above)\s+(\d+(?:\.\d+)?)', ">"),
+            (r'(?i)\b(?:less than|fewer than|under|below)\s+(\d+(?:\.\d+)?)', "<"),
+            (r'(?i)\b(?:at least|no fewer than|no less than|minimum of|minimum)\s+(\d+(?:\.\d+)?)', ">="),
+            (r'(?i)\b(?:at most|no more than|maximum of|maximum)\s+(\d+(?:\.\d+)?)', "<="),
+            (r'(?i)\b(?:equal to|equals|exactly)\s+(\d+(?:\.\d+)?)', "="),
+        ]
+
+        for pat, op in patterns:
+            for match in re.finditer(pat, q_lower):
+                val_str = match.group(1)
+                val = int(val_str) if val_str.isdigit() else float(val_str)
+                sal_field = SchemaAggregationResolver.resolve_numeric_metric(query, available_tables)
+                if not any(f.field == sal_field and f.operator == op and f.value == val for f in filters):
+                    filters.append(Filter(field=sal_field, operator=op, value=val))
+        return filters
+
+    @classmethod
+    def extract_metrics(cls, query: str, available_tables: List[str], intent: Any, existing_metrics: Optional[List[Any]] = None) -> List[Any]:
+        from app.ai.planner.planner_schema import Metric, IntentEnum
+        metrics = list(existing_metrics) if existing_metrics else []
+        q_lower = query.lower()
+        sal_field = SchemaAggregationResolver.resolve_numeric_metric(query, available_tables)
+
+        if "avg" in q_lower or "average" in q_lower:
+            if any(w in q_lower for w in ["salary", "pay", "payroll", "compensation"]):
+                if not any(m.operation == "avg" and m.alias == "avg_salary" for m in metrics):
+                    metrics.append(Metric(field=sal_field, operation="avg", alias="avg_salary"))
+            elif "attendance" in q_lower or "hours" in q_lower or "working hours" in q_lower:
+                if not any(m.operation == "avg" and m.alias == "avg_hours" for m in metrics):
+                    metrics.append(Metric(field="hours_worked", operation="avg", alias="avg_hours"))
+            elif "bonus" in q_lower:
+                if not any(m.operation == "avg" and m.alias == "avg_bonus" for m in metrics):
+                    metrics.append(Metric(field="bonus", operation="avg", alias="avg_bonus"))
+            elif "budget" in q_lower:
+                if not any(m.operation == "avg" and m.alias == "avg_budget" for m in metrics):
+                    metrics.append(Metric(field="budget", operation="avg", alias="avg_budget"))
+            elif "review" in q_lower or "score" in q_lower:
+                if not any(m.operation == "avg" and m.alias == "avg_score" for m in metrics):
+                    metrics.append(Metric(field="score", operation="avg", alias="avg_score"))
+            else:
+                if not any(m.operation == "avg" for m in metrics):
+                    metrics.append(Metric(field=sal_field, operation="avg", alias="avg_val"))
+
+        if "sum" in q_lower or any(w in q_lower for w in ["total payroll", "total salary", "total pay", "total bonus", "total budget", "total hours", "sum of", "total cost", "total amount"]):
+            if any(w in q_lower for w in ["salary", "pay", "payroll"]):
+                if not any(m.operation == "sum" and m.alias == "total_payroll" for m in metrics):
+                    metrics.append(Metric(field=sal_field, operation="sum", alias="total_payroll"))
+            elif "budget" in q_lower:
+                if not any(m.operation == "sum" and m.alias == "total_budget" for m in metrics):
+                    metrics.append(Metric(field="budget", operation="sum", alias="total_budget"))
+            elif "bonus" in q_lower:
+                if not any(m.operation == "sum" and m.alias == "total_bonus" for m in metrics):
+                    metrics.append(Metric(field="bonus", operation="sum", alias="total_bonus"))
+            elif "hours" in q_lower:
+                if not any(m.operation == "sum" and m.alias == "total_hours" for m in metrics):
+                    metrics.append(Metric(field="hours_worked", operation="sum", alias="total_hours"))
+            else:
+                if not any(m.operation == "sum" for m in metrics):
+                    metrics.append(Metric(field=sal_field, operation="sum", alias="total_val"))
+
+        has_count_phrase = any(w in q_lower for w in ["count", "number of", "how many"])
+        has_comparison_count = any(w in q_lower for w in ["more than", "greater than", "less than", "fewer than", "at least", "at most", "over", "under", "no fewer than", "no more than", "exceeding", "above", "below"]) and any(w in q_lower for w in ["employ", "staff", "worker", "person", "member", "proj", "dept", "department", "client", "office", "record", "user"])
+        has_total_entity = any(w in q_lower for w in ["total employ", "total staff", "total worker", "total depart", "total project", "total office", "total client", "total user"])
+
+        if has_count_phrase or has_comparison_count or has_total_entity:
+            if "distinct" in q_lower:
+                if not any(m.operation == "distinct_count" for m in metrics):
+                    metrics.append(Metric(field="id", operation="distinct_count", alias="distinct_count"))
+            elif not any(m.operation == "count" for m in metrics):
+                metrics.append(Metric(field="id", operation="count", alias="count"))
+
+        if "max" in q_lower or "maximum" in q_lower or ("highest" in q_lower and intent == IntentEnum.AGGREGATION):
+            field_name = "bonus" if "bonus" in q_lower else ("budget" if "budget" in q_lower else ("hours_worked" if any(w in q_lower for w in ["hours", "attendance"]) else sal_field))
+            if intent == IntentEnum.RANKING and not any(w in q_lower for w in ["max", "maximum"]):
+                if not any(m.field == field_name and m.operation == "" for m in metrics):
+                    metrics.append(Metric(field=field_name, operation="", alias=field_name))
+            else:
+                if not any(m.operation == "max" for m in metrics):
+                    metrics.append(Metric(field=field_name, operation="max", alias=f"max_{field_name}"))
+
+        if "min" in q_lower or "minimum" in q_lower or ("lowest" in q_lower and intent == IntentEnum.AGGREGATION):
+            field_name = "score" if any(w in q_lower for w in ["review", "score"]) else ("budget" if "budget" in q_lower else ("hours_worked" if any(w in q_lower for w in ["hours", "attendance"]) else sal_field))
+            if intent == IntentEnum.RANKING and not any(w in q_lower for w in ["min", "minimum"]):
+                if not any(m.field == field_name and m.operation == "" for m in metrics):
+                    metrics.append(Metric(field=field_name, operation="", alias=field_name))
+            else:
+                if not any(m.operation == "min" for m in metrics):
+                    metrics.append(Metric(field=field_name, operation="min", alias=f"min_{field_name}"))
+
+        if not metrics and intent in [IntentEnum.AGGREGATION, IntentEnum.COMPARISON, IntentEnum.RANKING]:
+            if intent == IntentEnum.RANKING:
+                metrics.append(Metric(field=sal_field, operation="", alias=sal_field))
+            else:
+                metrics.append(Metric(field="id", operation="count", alias="count"))
+
+        return metrics
 
 
 class TimeReasoningUtils:
     """Provides deterministic conversion of natural language date expressions into structured Filter objects."""
 
     @staticmethod
-    def parse_time_phrase(phrase: str, target_field: str = "date", ref_date: Optional[date] = None) -> List[Filter]:
+    def parse_time_phrase(
+        phrase: str,
+        target_field: str = "date",
+        table_name: Optional[str] = None,
+        ref_date: Optional[date] = None,
+    ) -> List[Filter]:
+        """Convert a natural-language time phrase into Filter objects.
+
+        Args:
+            phrase:       The natural language query string.
+            target_field: Fallback column name if schema resolution fails.
+            table_name:   If provided, the schema is inspected via
+                          SchemaDateColumnResolver to find the actual
+                          Date/DateTime column — no hardcoding.
+            ref_date:     Reference date for relative phrases (default: today).
+        """
+        # --- Schema-aware column resolution ---
+        if table_name:
+            resolved = SchemaDateColumnResolver.resolve(table_name)
+            if resolved:
+                target_field = resolved
+                logger.debug(
+                    f"TimeReasoningUtils: resolved date column for '{table_name}' -> '{target_field}'"
+                )
         if ref_date is None:
             ref_date = date.today()
 
@@ -160,6 +733,8 @@ class JoinDetectionUtils:
     def get_schema_graph(cls) -> Dict[str, Set[str]]:
         graph: Dict[str, Set[str]] = {}
         for table_name, table in Base.metadata.tables.items():
+            if table_name in SYSTEM_TABLES:
+                continue
             if table_name not in graph:
                 graph[table_name] = set()
             for fk in table.foreign_keys:
@@ -230,6 +805,69 @@ class JoinDetectionUtils:
         return None
 
 
+class SchemaJoinResolver:
+    """Generic Join Resolver that determines exact join conditions between tables using only SQLAlchemy metadata."""
+    
+    @classmethod
+    def resolve_join_condition(cls, t1: str, t2: str) -> str:
+        """Find the exact ON condition between table t1 and table t2 using Base.metadata.tables foreign keys."""
+        tbl1 = Base.metadata.tables.get(t1)
+        tbl2 = Base.metadata.tables.get(t2)
+        if tbl1 is None or tbl2 is None:
+            raise ValueError(f"Table '{t1}' or '{t2}' not found in SQLAlchemy metadata.")
+            
+        # Check if t1 has a foreign key pointing to t2
+        for fk in tbl1.foreign_keys:
+            if fk.column.table.name == t2:
+                return f"{t1}.{fk.parent.name} = {t2}.{fk.column.name}"
+                
+        # Check if t2 has a foreign key pointing to t1
+        for fk in tbl2.foreign_keys:
+            if fk.column.table.name == t1:
+                return f"{t2}.{fk.parent.name} = {t1}.{fk.column.name}"
+                
+        raise ValueError(f"No direct foreign key relationship exists between '{t1}' and '{t2}' in SQLAlchemy metadata.")
+        
+    @classmethod
+    def resolve_joins_for_tables(cls, tables: List[str]) -> List[Any]:
+        """Given a list of table names or join paths, resolve exact JoinCondition objects for consecutive pairs."""
+        from app.ai.structured_output.schemas import JoinCondition
+        
+        if not tables:
+            return []
+            
+        table_names = []
+        for item in tables:
+            if "->" in item:
+                for part in item.split("->"):
+                    t = part.strip()
+                    if t and t not in table_names:
+                        table_names.append(t)
+            else:
+                t = item.strip()
+                if t and t not in table_names:
+                    table_names.append(t)
+                    
+        if len(table_names) <= 1:
+            return []
+            
+        joins = []
+        seen_pairs = set()
+        
+        # Use JoinDetectionUtils to find connecting paths
+        paths = JoinDetectionUtils.detect_join_paths(table_names)
+        for path_str in paths:
+            parts = [p.strip() for p in path_str.split("->")]
+            for i in range(len(parts) - 1):
+                t1, t2 = parts[i], parts[i+1]
+                pair_key = tuple(sorted([t1, t2]))
+                if pair_key not in seen_pairs:
+                    seen_pairs.add(pair_key)
+                    on_cond = cls.resolve_join_condition(t1, t2)
+                    joins.append(JoinCondition(table=t2, on=on_cond))
+        return joins
+
+
 class BusinessRuleUtils:
     """Interprets business domain phrases into explicit query rules and annotations."""
 
@@ -280,8 +918,12 @@ class QueryDecompositionUtils:
 
         # Task 3: Metrics & Aggregations
         if plan.metrics:
-            m_strs = [f"{m.operation.upper()}({m.field})" + (f" AS {m.alias}" if m.alias else "") for m in plan.metrics]
-            tasks.append(f"Task {step_num}: Calculate aggregated metrics: " + ", ".join(m_strs))
+            m_strs = []
+            for m in plan.metrics:
+                op = m.operation.upper() if m.operation and m.operation.lower() != "none" else ""
+                expr = f"{op}({m.field})" if op else m.field
+                m_strs.append(expr + (f" AS {m.alias}" if m.alias and m.alias != m.field else ""))
+            tasks.append(f"Task {step_num}: Calculate metrics: " + ", ".join(m_strs))
             step_num += 1
 
         # Task 4: Group By
@@ -295,12 +937,26 @@ class QueryDecompositionUtils:
             tasks.append(f"Task {step_num}: Filter grouped aggregations where " + " and ".join(h_strs))
             step_num += 1
 
-        # Task 6: Sorting & Limit
+        # Task 6: Window Function & Partition Ranking
+        if plan.scope == "per_group" or plan.requires_partition_ranking:
+            part_str = ", ".join(plan.partition_by) if plan.partition_by else (plan.group or "group")
+            rank_metric = plan.metric or (plan.metrics[0].field if plan.metrics else "salary")
+            tasks.append(f"Task {step_num}: Apply window function ranking partitioned by [{part_str}] ordering by {rank_metric} {(plan.sort or 'DESC').upper()}")
+            step_num += 1
+            limit_g = plan.limit_per_group or plan.rank or plan.limit or 1
+            tasks.append(f"Task {step_num}: Filter ranked partition results where rank <= {limit_g}")
+            step_num += 1
+        elif plan.nth_rank is not None or plan.ranking_type == "nth":
+            r_val = plan.nth_rank or plan.rank or 2
+            tasks.append(f"Task {step_num}: Extract specific rank #{r_val} using window function ranking or offset")
+            step_num += 1
+
+        # Task 7: Sorting & Limit (Global)
         sort_limit_parts = []
-        if plan.order_by:
+        if plan.order_by and plan.scope != "per_group":
             o_strs = [f"{o.field} {o.direction.upper()}" for o in plan.order_by]
             sort_limit_parts.append(f"Sort by {', '.join(o_strs)}")
-        if plan.limit:
+        if plan.limit and plan.scope != "per_group":
             sort_limit_parts.append(f"Limit results to top {plan.limit} rows")
         if sort_limit_parts:
             tasks.append(f"Task {step_num}: " + "; ".join(sort_limit_parts))
@@ -309,3 +965,154 @@ class QueryDecompositionUtils:
             tasks.append("Task 1: Retrieve requested columns from primary entity")
 
         return tasks
+
+
+class RankingSemanticUtils:
+    """Generic semantic analyzer for ranking queries (Global Top/Bottom-N, N-th Rank, and Grouped/Partitioned Window Functions).
+    Avoids hardcoding specific query strings by extracting intent, ordinals, grouping scopes, and schema-mapped metrics dynamically.
+    """
+
+    _ORDINAL_MAP = {
+        "first": 1, "1st": 1,
+        "second": 2, "2nd": 2,
+        "third": 3, "3rd": 3,
+        "fourth": 4, "4th": 4,
+        "fifth": 5, "5th": 5,
+        "sixth": 6, "6th": 6,
+        "seventh": 7, "7th": 7,
+        "eighth": 8, "8th": 8,
+        "ninth": 9, "9th": 9,
+        "tenth": 10, "10th": 10
+    }
+
+    _NUMBER_WORD_MAP = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10
+    }
+
+    @classmethod
+    def analyze(cls, query: str, detected_tables: List[str]) -> Optional[Dict[str, Any]]:
+        q_lower = query.lower().strip()
+        
+        # Guard 1: Ignore comparison/filter expressions (HAVING or WHERE) like 'at least', 'at most', 'no less than', 'more than', etc.
+        if any(re.search(rf'\b{pat}\b', q_lower) for pat in [
+            "at least", "at most", "no less than", "no more than", "no fewer than",
+            "more than", "less than", "greater than", "fewer than", "exceeds", "exceeding",
+            "above", "below", "under", "over"
+        ]):
+            explicit_ranking = any(re.search(rf'\b{w}\b', q_lower) for w in [
+                "top", "bottom", "rank", "first", "last", "latest", "oldest", "newest", "nth", "performer", "earner"
+            ]) or any(w in q_lower for w in cls._ORDINAL_MAP.keys()) or re.search(r'\b\d+(?:st|nd|rd|th)\b', q_lower)
+            if not explicit_ranking:
+                return None
+
+        # Guard 2: Ignore simple scalar aggregations (maximum/minimum of a metric without requesting an entity ranking)
+        min_max_match = re.search(r'\b(?:maximum|minimum|max|min)\s+(?:of\s+)?([a-zA-Z0-9_]+)$', q_lower)
+        if min_max_match:
+            metric_word = min_max_match.group(1)
+            if metric_word not in {"employee", "employees", "department", "departments", "project", "projects", "office", "offices", "user", "users", "client", "clients", "manager", "managers", "record", "records"}:
+                return None
+
+        # Check if query contains ranking semantic indicators
+        ranking_words = [
+            "top", "bottom", "highest", "lowest", "best", "worst", "latest", "oldest", "newest", "first", "last",
+            "performer", "earner", "rank", "most", "least", "maximum", "minimum", "largest", "smallest", "earliest", "nth"
+        ]
+        has_ranking_word = any(w in q_lower for w in ranking_words) or any(w in q_lower for w in cls._ORDINAL_MAP.keys()) or re.search(r'\b\d+(?:st|nd|rd|th)\b', q_lower)
+        if not has_ranking_word:
+            return None
+
+        # 1. Detect N-th Rank or Ordinal
+        nth_rank = None
+        for word, val in cls._ORDINAL_MAP.items():
+            if re.search(r'\b' + re.escape(word) + r'\b', q_lower):
+                if val > 1:
+                    nth_rank = val
+                break
+        if nth_rank is None:
+            nth_match = re.search(r'\b(\d+)(?:st|nd|rd|th)\b', q_lower)
+            if nth_match and int(nth_match.group(1)) > 1:
+                nth_rank = int(nth_match.group(1))
+
+        # 2. Detect Limit or Top-N / Bottom-N count
+        rank_val = nth_rank
+        if rank_val is None:
+            limit_match = re.search(r'(?:top|first|last|highest|lowest|best|worst|bottom|most|least|maximum|minimum|largest|smallest)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b', q_lower)
+            if not limit_match:
+                limit_match = re.search(r'\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:lowest|highest|top|best|worst|bottom|most|least|maximum|minimum|largest|smallest)\b', q_lower)
+            if limit_match:
+                val_str = limit_match.group(1)
+                rank_val = cls._NUMBER_WORD_MAP.get(val_str, int(val_str) if val_str.isdigit() else 1)
+            else:
+                rank_val = 1
+
+        # 3. Detect Sort Direction and Ranking Type
+        is_asc = any(re.search(r'\b' + re.escape(w) + r'\b', q_lower) for w in ["lowest", "worst", "oldest", "earliest", "bottom", "smallest", "minimum", "least", "asc", "second lowest", "third lowest", "fourth lowest", "fifth lowest"])
+        direction = "asc" if is_asc else "desc"
+        
+        if nth_rank is not None:
+            ranking_type = "nth"
+        else:
+            ranking_type = "bottom" if direction == "asc" else "top"
+
+        # 4. Detect Grouping Scope & Partitioning
+        scope = "global"
+        group_col = None
+        partition_by = None
+        
+        group_cols = SemanticQueryParser.extract_grouping(query, detected_tables)
+        if group_cols:
+            scope = "per_group"
+            group_col = group_cols[0]
+            partition_by = [group_col]
+
+        # 5. Schema-Aware Metric Field Resolution
+        metric_field = None
+        is_date_ranking = any(re.search(r'\b' + re.escape(w) + r'\b', q_lower) for w in ["latest", "oldest", "newest", "first", "last", "recent", "hired", "hire", "hiring", "earliest"])
+        if is_date_ranking and not any(w in q_lower for w in ["salary", "pay", "payroll", "bonus", "attendance", "hours", "score", "performer", "performance"]):
+            for t_name in detected_tables:
+                res_col = SchemaDateColumnResolver.resolve(t_name)
+                if res_col:
+                    metric_field = res_col
+                    break
+        
+        if not metric_field:
+            match_res = SchemaColumnResolver.find_matching_schema_column(query, detected_tables)
+            if match_res:
+                matched_table, matched_col = match_res
+                metric_field = matched_col
+                if matched_table not in detected_tables:
+                    detected_tables.append(matched_table)
+            else:
+                metric_field = SchemaAggregationResolver.resolve_numeric_metric(query, detected_tables)
+                if metric_field == "base_salary" and "payroll" not in detected_tables:
+                    detected_tables.append("payroll")
+
+        if not metric_field:
+            metric_field = "id"
+
+        if group_col:
+            for t_name in Base.metadata.tables.keys():
+                if t_name in SYSTEM_TABLES:
+                    continue
+                if t_name == group_col or t_name == f"{group_col}s" or t_name == f"{group_col}es" or (group_col.endswith("y") and t_name == f"{group_col[:-1]}ies"):
+                    if t_name not in detected_tables:
+                        detected_tables.append(t_name)
+                    break
+
+        return {
+            "is_ranking": True,
+            "ranking_type": ranking_type,
+            "rank": rank_val,
+            "nth_rank": nth_rank,
+            "scope": scope,
+            "group": group_col,
+            "partition_by": partition_by,
+            "order": direction,
+            "metric_field": metric_field,
+            "tables": list(dict.fromkeys(detected_tables)),
+            "requires_window_function": (scope == "per_group" or ranking_type == "nth" or nth_rank is not None),
+            "requires_partition_ranking": (scope == "per_group"),
+            "requires_correlated_subquery": (ranking_type == "nth" and scope == "global")
+        }
+

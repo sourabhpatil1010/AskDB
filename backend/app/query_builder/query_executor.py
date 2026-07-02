@@ -12,7 +12,7 @@ class QueryExecutor:
     # Regex to detect dangerous SQL commands
     # We enforce that the query MUST start with SELECT and must NOT contain forbidden keywords.
     FORBIDDEN_KEYWORDS = re.compile(
-        r'\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|REPLACE|MERGE|GRANT|REVOKE|EXEC|EXECUTE)\b',
+        r'\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|REPLACE|MERGE|GRANT|REVOKE|EXEC|EXECUTE|COPY)\b',
         re.IGNORECASE
     )
 
@@ -20,9 +20,14 @@ class QueryExecutor:
         """Validates that the SQL is a SELECT statement and contains no dangerous keywords."""
         cleaned_sql = sql.strip().upper()
         
-        # Must start with SELECT
-        if not cleaned_sql.startswith("SELECT"):
-            logger.error("SQL validation failed: Query does not start with SELECT.")
+        # Must start with SELECT or WITH
+        if not (cleaned_sql.startswith("SELECT") or cleaned_sql.startswith("WITH")):
+            logger.error("SQL validation failed: Query does not start with SELECT or WITH.")
+            return False
+            
+        # If it starts with WITH, must contain SELECT after the CTE definition
+        if cleaned_sql.startswith("WITH") and not re.search(r'\bSELECT\b', cleaned_sql):
+            logger.error("SQL validation failed: CTE query does not contain SELECT.")
             return False
             
         # Must not contain multiple statements (;) inside
@@ -40,7 +45,7 @@ class QueryExecutor:
 
     async def execute(self, session: AsyncSession, sql: str, parameters: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not self._is_safe(sql):
-            raise ValueError("Unsafe SQL query detected. Only SELECT statements are allowed.")
+            raise ValueError("Unsafe SQL query detected. Only SELECT or WITH ... SELECT statements are allowed.")
             
         try:
             # text() ensures it's treated as a parameterized query by SQLAlchemy

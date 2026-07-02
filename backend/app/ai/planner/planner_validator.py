@@ -3,7 +3,7 @@ from typing import List, Set, Dict
 
 from app.models import Base
 from app.ai.planner.planner_schema import ExecutionPlan, PlannerClarificationException
-from app.ai.planner.planner_utils import JoinDetectionUtils, QueryDecompositionUtils, BusinessRuleUtils, TimeReasoningUtils
+from app.ai.planner.planner_utils import JoinDetectionUtils, QueryDecompositionUtils, BusinessRuleUtils, TimeReasoningUtils, SYSTEM_TABLES, SchemaColumnResolver
 
 logger = logging.getLogger(__name__)
 
@@ -12,10 +12,11 @@ class PlannerValidator:
     """Validates ExecutionPlan against database schema and enforces confidence thresholds."""
 
     def __init__(self):
-        self.valid_tables: Set[str] = set(Base.metadata.tables.keys())
+        self.valid_tables: Set[str] = {t for t in Base.metadata.tables.keys() if t not in SYSTEM_TABLES}
         self.table_columns: Dict[str, Set[str]] = {
             t_name: set(col.name for col in table.columns)
             for t_name, table in Base.metadata.tables.items()
+            if t_name not in SYSTEM_TABLES
         }
 
     def validate_and_enrich(self, plan: ExecutionPlan, original_query: str) -> ExecutionPlan:
@@ -56,7 +57,8 @@ class PlannerValidator:
                 logger.debug(f"Automatically enriched relationships: {plan.relationships}")
 
         # 4. Enrich Time Reasoning Filters
-        time_filters = TimeReasoningUtils.parse_time_phrase(original_query)
+        primary_table = plan.tables[0] if plan.tables else None
+        time_filters = TimeReasoningUtils.parse_time_phrase(original_query, table_name=primary_table)
         if time_filters:
             existing_filters = plan.filters or []
             # Merge without duplicates
@@ -79,6 +81,37 @@ class PlannerValidator:
             plan.decomposition = QueryDecompositionUtils.decompose(plan)
             logger.debug(f"Automatically generated query decomposition: {plan.decomposition}")
 
+        # 6.5. Enrich partition_by if scope is per_group or requires_partition_ranking
+        if plan.scope == "per_group" or plan.requires_partition_ranking:
+            if not plan.partition_by and plan.group:
+                plan.partition_by = [plan.group]
+            elif not plan.partition_by and plan.group_by:
+                plan.partition_by = list(plan.group_by)
+            if plan.partition_by:
+                from app.ai.planner.planner_utils import SchemaGroupingResolver
+                for p in plan.partition_by:
+                    col_expr = SchemaGroupingResolver.resolve_grouping_column(p, self.valid_tables)
+                    if col_expr and "." in col_expr:
+                        tbl = col_expr.split(".")[0]
+                        if tbl in self.valid_tables and tbl not in plan.tables:
+                            plan.tables.append(tbl)
+
+        # 6.6 Ensure domain tables required by filters and order_by are present in plan.tables
+        all_fields = []
+        if plan.filters:
+            for f in plan.filters:
+                all_fields.append(f.field)
+        if plan.order_by:
+            for o in plan.order_by:
+                all_fields.append(o.field)
+        for field in all_fields:
+            owner = SchemaColumnResolver.resolve_column_owner(field, plan.tables)
+            if owner and owner not in plan.tables and owner in self.valid_tables:
+                plan.tables.append(owner)
+
+        # 7. Check for Unsupported SQL Capabilities AFTER generating and enriching ExecutionPlan
+        self._check_unsupported_capabilities(plan, original_query)
+
         return plan
 
     def _generate_fallback_questions(self, query: str, plan: ExecutionPlan) -> List[str]:
@@ -100,3 +133,18 @@ class PlannerValidator:
             questions.append("Please specify which tables or date ranges you would like to investigate.")
             
         return questions
+
+    def _check_unsupported_capabilities(self, plan: ExecutionPlan, query: str):
+        """Detects unsupported SQL patterns (e.g. Recursive Queries, Unions, Moving Averages), failing gracefully."""
+        q_lower = query.lower()
+        unsupported_terms = [
+            "running total", "cumulative sum", "moving average", "recursive", "hierarchy tree",
+            "org chart hierarchy", "chain of command", "union of", "intersect with", "except for"
+        ]
+        for term in unsupported_terms:
+            if term in q_lower:
+                raise PlannerClarificationException(
+                    questions=[f"The query '{query}' involves '{term}', which requires advanced SQL capabilities (such as Recursive CTEs or Union) not currently supported."],
+                    confidence=0.0
+                )
+

@@ -17,7 +17,7 @@ class IntentEnum(str, Enum):
 
 class Metric(BaseModel):
     field: str = Field(description="The column name or expression to aggregate, e.g. 'salary', 'id', or '*'")
-    operation: str = Field(description="The aggregation operation: count, sum, avg, min, max, distinct_count, median")
+    operation: str = Field(description="The aggregation operation: count, sum, avg, min, max, distinct_count, median. Leave empty ('') or 'none' for ranking/non-aggregated column selection.")
     alias: Optional[str] = Field(default=None, description="Optional alias for the metric result, e.g. 'avg_salary'")
 
 
@@ -52,6 +52,19 @@ class ExecutionPlan(BaseModel):
     having: Optional[List[HavingCondition]] = Field(default=None, description="List of HAVING conditions for aggregated results")
     order_by: Optional[List[OrderCondition]] = Field(default=None, description="Sorting rules")
     limit: Optional[int] = Field(default=None, description="Maximum number of rows to return, e.g. Top 5, Top 10")
+    scope: Optional[str] = Field(default=None, description="Scope of ranking: 'global' or 'per_group'")
+    ranking_type: Optional[str] = Field(default=None, description="Type of ranking: 'top' (highest/best/latest), 'bottom' (lowest/worst/oldest), or 'nth' (specific rank)")
+    rank: Optional[int] = Field(default=None, description="The integer rank or limit requested, e.g., 10 for 'Top 10', 3 for 'Top 3 per department', or 2 for 'second highest'")
+    partition_by: Optional[List[str]] = Field(default=None, description="List of columns or entities to partition by when ranking within groups, e.g., ['department', 'team']")
+    order: Optional[str] = Field(default=None, description="Sort order for ranking: 'desc' or 'asc'")
+    group: Optional[str] = Field(default=None, description="Group name for scoped queries, e.g., 'department'")
+    metric: Optional[str] = Field(default=None, description="Primary metric string for ranking or analysis, e.g., 'salary'")
+    sort: Optional[str] = Field(default=None, description="Primary sort direction, e.g., 'DESC' or 'ASC'")
+    limit_per_group: Optional[int] = Field(default=None, description="Limit per group for Top-N per group queries")
+    nth_rank: Optional[int] = Field(default=None, description="Specific rank requested, e.g., 2 for second highest, 3 for third highest")
+    requires_window_function: bool = Field(default=False, description="True if query requires SQL window functions (e.g., ROW_NUMBER, RANK)")
+    requires_correlated_subquery: bool = Field(default=False, description="True if query requires correlated subqueries")
+    requires_partition_ranking: bool = Field(default=False, description="True if query requires partition ranking across groups")
     decomposition: Optional[List[str]] = Field(default=None, description="Logical task-by-task breakdown of complex queries")
     business_rules_applied: Optional[List[str]] = Field(default=None, description="List of business rule interpretations applied during planning")
     confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Planner confidence score between 0.0 and 1.0")
