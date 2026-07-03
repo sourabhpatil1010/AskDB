@@ -56,6 +56,18 @@ class WindowPlan(BaseModel):
 AnalyticalWindowPlan = WindowPlan
 
 
+class TimePlan(BaseModel):
+    """Generic temporal planning metadata carried from AI Planner to JSON Generator."""
+    time_expression: Optional[str] = Field(default=None, description="The natural language time phrase, e.g. 'last month', 'this year', 'yesterday'")
+    date_field: str = Field(description="The resolved date column name or expression, e.g. 'employees.hire_date'")
+    operator: str = Field(description="The temporal comparison operator: '=', '!=', '>', '<', '>=', '<=', 'between', 'before', 'after', 'in'")
+    start_date: Optional[str] = Field(default=None, description="Start date in ISO format (YYYY-MM-DD) or relative start expression")
+    end_date: Optional[str] = Field(default=None, description="End date in ISO format (YYYY-MM-DD) or relative end expression")
+    relative_period: Optional[str] = Field(default=None, description="Relative time period label, e.g. 'yesterday', 'today', 'last_week', 'this_month', 'last_30_days'")
+    relative_offset: Optional[int] = Field(default=None, description="Numeric offset in days, weeks, months, or years")
+    granularity: Optional[str] = Field(default=None, description="Time granularity: 'day', 'week', 'month', 'quarter', 'year'")
+
+
 class ExecutionPlan(BaseModel):
     intent: Union[IntentEnum, str] = Field(description="The primary business intent of the query")
     tables: List[str] = Field(description="List of database tables required for this query")
@@ -66,6 +78,7 @@ class ExecutionPlan(BaseModel):
     filters: Optional[List[Filter]] = Field(default=None, description="List of filtering conditions")
     group_by: Optional[List[str]] = Field(default=None, description="List of columns or time granularity labels to group by (e.g., 'department', 'month', 'quarter')")
     time_granularity: Optional[str] = Field(default=None, description="Time bucket granularity for grouping: 'day', 'week', 'month', 'quarter', 'year'. Set when user asks to group by a time period.")
+    time_plan: Optional[TimePlan] = Field(default=None, description="Temporal planning metadata if the query involves natural language time expressions")
     having: Optional[List[HavingCondition]] = Field(default=None, description="List of HAVING conditions for aggregated results")
     order_by: Optional[List[OrderCondition]] = Field(default=None, description="Sorting rules")
     limit: Optional[int] = Field(default=None, description="Maximum number of rows to return, e.g. Top 5, Top 10")

@@ -5,6 +5,149 @@ from app.query_builder.param_coercion import coerce_parameters
 
 logger = logging.getLogger(__name__)
 
+
+class TimeRangeSQLUtils:
+    """
+    Reusable helper methods for converting TimePlan metadata into parameterized SQL predicates.
+    All methods are generic, metadata-driven, and schema-aware.
+    """
+    @classmethod
+    def resolve_today(cls, qual_col: str, tp: Any = None, parameters: Dict[str, Any] = None, param_prefix: str = "", param_field_map: Dict[str, tuple[str, str]] = None, table: str = "", field: str = "") -> str:
+        return f"{qual_col} = CURRENT_DATE"
+
+    @classmethod
+    def resolve_yesterday(cls, qual_col: str, tp: Any = None, parameters: Dict[str, Any] = None, param_prefix: str = "", param_field_map: Dict[str, tuple[str, str]] = None, table: str = "", field: str = "") -> str:
+        return f"{qual_col} = CURRENT_DATE - INTERVAL '1 day'"
+
+    @classmethod
+    def resolve_relative_days(cls, qual_col: str, tp: Any, parameters: Dict[str, Any] = None, param_prefix: str = "", param_field_map: Dict[str, tuple[str, str]] = None, table: str = "", field: str = "") -> str:
+        import re
+        n_days = 30
+        if tp and getattr(tp, "relative_offset", None) is not None and getattr(tp, "relative_offset", 0) != 0:
+            n_days = abs(int(tp.relative_offset))
+        elif tp and getattr(tp, "relative_period", None):
+            match = re.search(r'(\d+)', str(tp.relative_period))
+            if match:
+                n_days = int(match.group(1))
+        elif tp and getattr(tp, "time_expression", None):
+            match = re.search(r'(\d+)', str(tp.time_expression))
+            if match:
+                n_days = int(match.group(1))
+                
+        day_unit = "day" if n_days == 1 else "days"
+        is_next = (tp and getattr(tp, "relative_period", "") and "next" in str(tp.relative_period).lower()) or (tp and getattr(tp, "time_expression", "") and "next" in str(tp.time_expression).lower()) or (tp and getattr(tp, "relative_offset", 0) and int(getattr(tp, "relative_offset", 0)) > 0)
+        if is_next:
+            return f"{qual_col} BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '{n_days} {day_unit}'"
+        return f"{qual_col} >= CURRENT_DATE - INTERVAL '{n_days} {day_unit}'"
+
+    @classmethod
+    def _bind_range_params(cls, qual_col: str, tp: Any, parameters: Dict[str, Any], param_prefix: str, param_field_map: Dict[str, tuple[str, str]], table: str, field: str) -> str:
+        op = (getattr(tp, "operator", "=") or "=").upper()
+        start_d = getattr(tp, "start_date", None)
+        end_d = getattr(tp, "end_date", None)
+        
+        # Fallback if start_date / end_date missing
+        if not (start_d and end_d) and op == "BETWEEN":
+            from datetime import date, timedelta
+            today = date.today()
+            rel = str(getattr(tp, "relative_period", "") or "").lower()
+            if "last_month" in rel:
+                if today.month == 1:
+                    start_d = date(today.year - 1, 12, 1).isoformat()
+                    end_d = date(today.year - 1, 12, 31).isoformat()
+                else:
+                    start_d = date(today.year, today.month - 1, 1).isoformat()
+                    end_d = (date(today.year, today.month, 1) - timedelta(days=1)).isoformat()
+            elif "this_month" in rel:
+                start_d = date(today.year, today.month, 1).isoformat()
+                if today.month == 12: end_d = date(today.year, 12, 31).isoformat()
+                else: end_d = (date(today.year, today.month + 1, 1) - timedelta(days=1)).isoformat()
+            elif "this_year" in rel:
+                start_d = f"{today.year}-01-01"
+                end_d = f"{today.year}-12-31"
+            elif "last_year" in rel:
+                start_d = f"{today.year - 1}-01-01"
+                end_d = f"{today.year - 1}-12-31"
+            else:
+                start_d = start_d or today.isoformat()
+                end_d = end_d or today.isoformat()
+
+        if op == "BETWEEN":
+            p1 = f"{param_prefix}_start"
+            p2 = f"{param_prefix}_end"
+            if parameters is not None:
+                parameters[p1] = start_d
+                parameters[p2] = end_d
+            if param_field_map is not None and table and field:
+                param_field_map[p1] = (table, field)
+                param_field_map[p2] = (table, field)
+            return f"{qual_col} BETWEEN :{p1} AND :{p2}"
+        elif op in (">", "<", ">=", "<=", "=", "!="):
+            p1 = f"{param_prefix}_val"
+            val = start_d or end_d
+            if parameters is not None:
+                parameters[p1] = val
+            if param_field_map is not None and table and field:
+                param_field_map[p1] = (table, field)
+            return f"{qual_col} {op} :{p1}"
+        else:
+            p1 = f"{param_prefix}_start"
+            p2 = f"{param_prefix}_end"
+            if parameters is not None:
+                parameters[p1] = start_d
+                parameters[p2] = end_d
+            if param_field_map is not None and table and field:
+                param_field_map[p1] = (table, field)
+                param_field_map[p2] = (table, field)
+            return f"{qual_col} BETWEEN :{p1} AND :{p2}"
+
+    @classmethod
+    def resolve_last_week(cls, qual_col: str, tp: Any, parameters: Dict[str, Any] = None, param_prefix: str = "", param_field_map: Dict[str, tuple[str, str]] = None, table: str = "", field: str = "") -> str:
+        return cls._bind_range_params(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+
+    @classmethod
+    def resolve_last_month(cls, qual_col: str, tp: Any, parameters: Dict[str, Any] = None, param_prefix: str = "", param_field_map: Dict[str, tuple[str, str]] = None, table: str = "", field: str = "") -> str:
+        return cls._bind_range_params(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+
+    @classmethod
+    def resolve_last_quarter(cls, qual_col: str, tp: Any, parameters: Dict[str, Any] = None, param_prefix: str = "", param_field_map: Dict[str, tuple[str, str]] = None, table: str = "", field: str = "") -> str:
+        return cls._bind_range_params(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+
+    @classmethod
+    def resolve_this_year(cls, qual_col: str, tp: Any, parameters: Dict[str, Any] = None, param_prefix: str = "", param_field_map: Dict[str, tuple[str, str]] = None, table: str = "", field: str = "") -> str:
+        return cls._bind_range_params(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+
+    @classmethod
+    def resolve_custom_range(cls, qual_col: str, tp: Any, parameters: Dict[str, Any] = None, param_prefix: str = "", param_field_map: Dict[str, tuple[str, str]] = None, table: str = "", field: str = "") -> str:
+        return cls._bind_range_params(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+
+    @classmethod
+    def resolve_time_predicate(cls, qual_col: str, tp: Any, parameters: Dict[str, Any] = None, param_prefix: str = "", param_field_map: Dict[str, tuple[str, str]] = None, table: str = "", field: str = "") -> str:
+        rel_period = str(getattr(tp, "relative_period", "") or "").lower()
+        expr = str(getattr(tp, "time_expression", "") or "").lower()
+
+        if rel_period == "today" or expr == "today":
+            return cls.resolve_today(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+        if rel_period == "yesterday" or expr == "yesterday":
+            return cls.resolve_yesterday(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+        if rel_period == "tomorrow" or expr == "tomorrow":
+            return f"{qual_col} = CURRENT_DATE + INTERVAL '1 day'"
+        if "days" in rel_period or "days" in expr or (getattr(tp, "granularity", "") == "day" and getattr(tp, "relative_offset", None) is not None and getattr(tp, "relative_offset", 0) != 0):
+            return cls.resolve_relative_days(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+        if rel_period == "custom_range" or "between" in expr or "before" in expr or "after" in expr or "from" in expr or getattr(tp, "operator", "") in ("<", ">", "<=", ">="):
+            return cls.resolve_custom_range(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+        if "week" in rel_period or "week" in expr:
+            return cls.resolve_last_week(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+        if "month" in rel_period or "month" in expr:
+            return cls.resolve_last_month(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+        if "quarter" in rel_period or "quarter" in expr:
+            return cls.resolve_last_quarter(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+        if "year" in rel_period or "year" in expr or "covid" in rel_period or "covid" in expr:
+            return cls.resolve_this_year(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+
+        return cls.resolve_custom_range(qual_col, tp, parameters, param_prefix, param_field_map, table, field)
+
+
 class SQLGenerator:
     """
     Generates parameterized PostgreSQL queries from StructuredQuery objects.
@@ -43,45 +186,83 @@ class SQLGenerator:
         default_table: str,
         param_counter: int,
         parameters: Dict[str, Any],
-        param_field_map: Dict[str, tuple[str, str]]
+        param_field_map: Dict[str, tuple[str, str]],
+        time_plan: Any = None
     ) -> Tuple[str | None, int]:
-        if not filters:
+        if not filters and not time_plan:
             return None, param_counter
         from app.ai.planner.planner_utils import SchemaColumnResolver
         where_clauses = []
-        for f in filters:
-            filter_table = SchemaColumnResolver.resolve_column_owner(f.field, all_tbls) or f.table or default_table
-            qual_field = SchemaColumnResolver.qualify_column(f.field, all_tbls, default_table=default_table)
-            param_name = f"{f.field.replace('(', '').replace(')', '')}_{param_counter}"
-            if filter_table:
-                param_name = f"{filter_table}_{param_name}"
-            op = f.operator.value
-            
-            if op in ("IS NULL", "IS NOT NULL"):
-                where_clauses.append(f"{qual_field} {op}")
-            elif op == "BETWEEN":
-                param_name_1 = f"{param_name}_1"
-                param_name_2 = f"{param_name}_2"
-                where_clauses.append(f"{qual_field} BETWEEN :{param_name_1} AND :{param_name_2}")
-                parameters[param_name_1] = f.value[0]
-                parameters[param_name_2] = f.value[1]
-                param_field_map[param_name_1] = (filter_table, f.field)
-                param_field_map[param_name_2] = (filter_table, f.field)
-            elif op == "IN":
-                in_params = []
-                for idx, val in enumerate(f.value):
-                    p_name = f"{param_name}_{idx}"
-                    in_params.append(f":{p_name}")
-                    parameters[p_name] = val
-                    param_field_map[p_name] = (filter_table, f.field)
-                in_str = ", ".join(in_params)
-                where_clauses.append(f"{qual_field} IN ({in_str})")
+
+        tp_table = None
+        tp_col = None
+        if time_plan and getattr(time_plan, "date_field", None):
+            tp_table = SchemaColumnResolver.resolve_column_owner(time_plan.date_field, all_tbls) or default_table
+            if "." in time_plan.date_field:
+                tp_col = time_plan.date_field.split(".")[-1].strip()
             else:
-                where_clauses.append(f"{qual_field} {op} :{param_name}")
-                parameters[param_name] = f.value
-                param_field_map[param_name] = (filter_table, f.field)
+                tp_col = time_plan.date_field.strip()
+
+        if filters:
+            for f in filters:
+                filter_table = SchemaColumnResolver.resolve_column_owner(f.field, all_tbls) or f.table or default_table
+                f_col = f.field.split(".")[-1].strip() if "." in f.field else f.field.strip()
+                if time_plan and tp_col and f_col == tp_col:
+                    logger.info(f"Skipping normal filter on '{f.field}' because TimePlan is active for '{time_plan.date_field}'")
+                    continue
+                qual_field = SchemaColumnResolver.qualify_column(f.field, all_tbls, default_table=default_table)
+                param_name = f"{f.field.replace('(', '').replace(')', '')}_{param_counter}"
+                if filter_table:
+                    param_name = f"{filter_table}_{param_name}"
+                op = f.operator.value
+                
+                if op in ("IS NULL", "IS NOT NULL"):
+                    where_clauses.append(f"{qual_field} {op}")
+                elif op == "BETWEEN":
+                    param_name_1 = f"{param_name}_1"
+                    param_name_2 = f"{param_name}_2"
+                    where_clauses.append(f"{qual_field} BETWEEN :{param_name_1} AND :{param_name_2}")
+                    parameters[param_name_1] = f.value[0]
+                    parameters[param_name_2] = f.value[1]
+                    param_field_map[param_name_1] = (filter_table, f.field)
+                    param_field_map[param_name_2] = (filter_table, f.field)
+                elif op == "IN":
+                    in_params = []
+                    for idx, val in enumerate(f.value):
+                        p_name = f"{param_name}_{idx}"
+                        in_params.append(f":{p_name}")
+                        parameters[p_name] = val
+                        param_field_map[p_name] = (filter_table, f.field)
+                    in_str = ", ".join(in_params)
+                    where_clauses.append(f"{qual_field} IN ({in_str})")
+                else:
+                    where_clauses.append(f"{qual_field} {op} :{param_name}")
+                    parameters[param_name] = f.value
+                    param_field_map[param_name] = (filter_table, f.field)
+                
+                param_counter += 1
+
+        if time_plan and getattr(time_plan, "date_field", None):
+            qual_tp_field = SchemaColumnResolver.qualify_column(time_plan.date_field, all_tbls, default_table=default_table)
+            param_prefix = f"time_{param_counter}"
+            if tp_table and tp_col:
+                param_prefix = f"{tp_table}_{tp_col}_{param_counter}"
             
-            param_counter += 1
+            time_sql = TimeRangeSQLUtils.resolve_time_predicate(
+                qual_tp_field,
+                time_plan,
+                parameters=parameters,
+                param_prefix=param_prefix,
+                param_field_map=param_field_map,
+                table=tp_table,
+                field=tp_col
+            )
+            if time_sql:
+                where_clauses.append(time_sql)
+                param_counter += 1
+
+        if not where_clauses:
+            return None, param_counter
         return "WHERE " + "\n  AND ".join(where_clauses), param_counter
 
     def _build_order_clause(
@@ -245,7 +426,7 @@ class SQLGenerator:
 
         # WHERE
         where_str, param_counter = self._build_where_clause(
-            query.filters, all_tbls, query.table, param_counter, parameters, param_field_map
+            query.filters, all_tbls, query.table, param_counter, parameters, param_field_map, time_plan=getattr(query, "time_plan", None)
         )
         if where_str:
             sql_parts.append(where_str)
@@ -437,7 +618,7 @@ class SQLGenerator:
         sql_parts.extend(self._build_join_clause(query.joins))
         
         where_str, param_counter = self._build_where_clause(
-            query.filters, all_tbls, query.table, param_counter, parameters, param_field_map
+            query.filters, all_tbls, query.table, param_counter, parameters, param_field_map, time_plan=getattr(query, "time_plan", None)
         )
         if where_str:
             sql_parts.append(where_str)

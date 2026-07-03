@@ -6,7 +6,7 @@ import logging
 
 from sqlalchemy import Date, DateTime
 from app.models import Base
-from app.ai.planner.planner_schema import Filter, ExecutionPlan, OrderCondition
+from app.ai.planner.planner_schema import Filter, ExecutionPlan, OrderCondition, TimePlan
 
 logger = logging.getLogger(__name__)
 
@@ -723,7 +723,478 @@ class TimeReasoningUtils:
             y = in_year_match.group(1)
             return [Filter(field=target_field, operator="between", value=[f"{y}-01-01", f"{y}-12-31"], time_reasoning=f"Year {y}")]
 
+        tp = TimeSemanticUtils.analyze(phrase, [table_name] if table_name else [], ref_date)
+        if tp and tp.start_date:
+            val = [tp.start_date, tp.end_date] if tp.operator.lower() == "between" else tp.start_date
+            return [Filter(field=target_field, operator=tp.operator, value=val, time_reasoning=tp.relative_period)]
         return []
+
+
+class TimeSemanticUtils:
+    """Semantic analysis for time intelligence expressions without hardcoded table/column logic."""
+
+    @classmethod
+    def resolve_target_date_field(cls, query: str, available_tables: List[str]) -> str:
+        """Resolve the date field dynamically using SchemaDateColumnResolver and query context."""
+        q_lower = query.lower()
+        best_table = None
+        
+        if len(available_tables) > 1:
+            for tbl in available_tables:
+                t_lower = tbl.lower()
+                sing = t_lower[:-1] if t_lower.endswith("s") else t_lower
+                if t_lower in q_lower or sing in q_lower:
+                    best_table = tbl
+                    break
+            if not best_table:
+                kw_map = {
+                    "hire": "employees", "hired": "employees",
+                    "payroll": "payroll", "salary": "payroll", "salaries": "payroll", "pay": "payroll",
+                    "attendance": "attendance", "hours": "attendance",
+                    "project": "projects", "review": "performance_reviews", "leave": "leave_requests"
+                }
+                for kw, tbl in kw_map.items():
+                    if kw in q_lower and tbl in available_tables:
+                        best_table = tbl
+                        break
+
+        if best_table:
+            col = SchemaDateColumnResolver.resolve(best_table)
+            if col:
+                return col if len(available_tables) == 1 else f"{best_table}.{col}"
+        
+        tbl, col = SchemaDateColumnResolver.resolve_for_tables(available_tables)
+        if col:
+            return col if len(available_tables) == 1 else f"{tbl}.{col}"
+        return "date"
+
+    @classmethod
+    def analyze(
+        cls,
+        query: str,
+        available_tables: List[str],
+        ref_date: Optional[date] = None
+    ) -> Optional[TimePlan]:
+        """Analyse natural language query for time expressions and return a TimePlan."""
+        if ref_date is None:
+            ref_date = date.today()
+        p = query.lower().strip()
+        year = ref_date.year
+        month = ref_date.month
+
+        date_field = cls.resolve_target_date_field(query, available_tables)
+
+        if "today" in p:
+            return TimePlan(
+                time_expression="today",
+                date_field=date_field,
+                operator="=",
+                start_date=ref_date.isoformat(),
+                end_date=ref_date.isoformat(),
+                relative_period="today",
+                relative_offset=0,
+                granularity="day"
+            )
+
+        if "yesterday" in p:
+            yest = ref_date - timedelta(days=1)
+            return TimePlan(
+                time_expression="yesterday",
+                date_field=date_field,
+                operator="=",
+                start_date=yest.isoformat(),
+                end_date=yest.isoformat(),
+                relative_period="yesterday",
+                relative_offset=-1,
+                granularity="day"
+            )
+
+        if "tomorrow" in p:
+            tom = ref_date + timedelta(days=1)
+            return TimePlan(
+                time_expression="tomorrow",
+                date_field=date_field,
+                operator="=",
+                start_date=tom.isoformat(),
+                end_date=tom.isoformat(),
+                relative_period="tomorrow",
+                relative_offset=1,
+                granularity="day"
+            )
+
+        days_match = re.search(r"(?:last|past|next)\s+(\d+)\s+days?", p)
+        if days_match:
+            n_days = int(days_match.group(1))
+            is_next = "next" in days_match.group(0)
+            if is_next:
+                start_d = ref_date
+                end_d = ref_date + timedelta(days=n_days)
+                rel_period = f"next_{n_days}_days"
+                offset = n_days
+            else:
+                start_d = ref_date - timedelta(days=n_days)
+                end_d = ref_date
+                rel_period = f"last_{n_days}_days"
+                offset = -n_days
+            return TimePlan(
+                time_expression=days_match.group(0),
+                date_field=date_field,
+                operator="between",
+                start_date=start_d.isoformat(),
+                end_date=end_d.isoformat(),
+                relative_period=rel_period,
+                relative_offset=offset,
+                granularity="day"
+            )
+
+        if "this week" in p:
+            start_week = ref_date - timedelta(days=ref_date.weekday())
+            end_week = start_week + timedelta(days=6)
+            return TimePlan(
+                time_expression="this week",
+                date_field=date_field,
+                operator="between",
+                start_date=start_week.isoformat(),
+                end_date=end_week.isoformat(),
+                relative_period="this_week",
+                relative_offset=0,
+                granularity="week"
+            )
+
+        if "last week" in p:
+            start_week = ref_date - timedelta(days=ref_date.weekday() + 7)
+            end_week = start_week + timedelta(days=6)
+            return TimePlan(
+                time_expression="last week",
+                date_field=date_field,
+                operator="between",
+                start_date=start_week.isoformat(),
+                end_date=end_week.isoformat(),
+                relative_period="last_week",
+                relative_offset=-1,
+                granularity="week"
+            )
+
+        if "next week" in p:
+            start_week = ref_date + timedelta(days=7 - ref_date.weekday())
+            end_week = start_week + timedelta(days=6)
+            return TimePlan(
+                time_expression="next week",
+                date_field=date_field,
+                operator="between",
+                start_date=start_week.isoformat(),
+                end_date=end_week.isoformat(),
+                relative_period="next_week",
+                relative_offset=1,
+                granularity="week"
+            )
+
+        if "this month" in p:
+            start_month = date(year, month, 1)
+            if month == 12: end_month = date(year, 12, 31)
+            else: end_month = date(year, month + 1, 1) - timedelta(days=1)
+            return TimePlan(
+                time_expression="this month",
+                date_field=date_field,
+                operator="between",
+                start_date=start_month.isoformat(),
+                end_date=end_month.isoformat(),
+                relative_period="this_month",
+                relative_offset=0,
+                granularity="month"
+            )
+
+        if "last month" in p:
+            if month == 1:
+                start_month = date(year - 1, 12, 1)
+                end_month = date(year - 1, 12, 31)
+            else:
+                start_month = date(year, month - 1, 1)
+                end_month = date(year, month, 1) - timedelta(days=1)
+            return TimePlan(
+                time_expression="last month",
+                date_field=date_field,
+                operator="between",
+                start_date=start_month.isoformat(),
+                end_date=end_month.isoformat(),
+                relative_period="last_month",
+                relative_offset=-1,
+                granularity="month"
+            )
+
+        if "next month" in p:
+            if month == 12:
+                start_month = date(year + 1, 1, 1)
+                end_month = date(year + 1, 1, 31)
+            else:
+                start_month = date(year, month + 1, 1)
+                if month + 1 == 12: end_month = date(year, 12, 31)
+                else: end_month = date(year, month + 2, 1) - timedelta(days=1)
+            return TimePlan(
+                time_expression="next month",
+                date_field=date_field,
+                operator="between",
+                start_date=start_month.isoformat(),
+                end_date=end_month.isoformat(),
+                relative_period="next_month",
+                relative_offset=1,
+                granularity="month"
+            )
+
+        months_match = re.search(r"(?:last|past)\s+(\d+)\s+months?", p)
+        if months_match:
+            n_months = int(months_match.group(1))
+            m_start = month - n_months
+            y_start = year
+            while m_start <= 0:
+                m_start += 12
+                y_start -= 1
+            start_m = date(y_start, m_start, 1)
+            return TimePlan(
+                time_expression=months_match.group(0),
+                date_field=date_field,
+                operator="between",
+                start_date=start_m.isoformat(),
+                end_date=ref_date.isoformat(),
+                relative_period=f"last_{n_months}_months",
+                relative_offset=-n_months,
+                granularity="month"
+            )
+
+        if "this quarter" in p:
+            q_idx = (month - 1) // 3
+            start_m = q_idx * 3 + 1
+            start_q = date(year, start_m, 1)
+            if start_m == 10: end_q = date(year, 12, 31)
+            else: end_q = date(year, start_m + 3, 1) - timedelta(days=1)
+            return TimePlan(
+                time_expression="this quarter",
+                date_field=date_field,
+                operator="between",
+                start_date=start_q.isoformat(),
+                end_date=end_q.isoformat(),
+                relative_period="this_quarter",
+                relative_offset=0,
+                granularity="quarter"
+            )
+
+        if "last quarter" in p:
+            q_idx = (month - 1) // 3
+            if q_idx == 0:
+                start_q = date(year - 1, 10, 1)
+                end_q = date(year - 1, 12, 31)
+            else:
+                start_m = (q_idx - 1) * 3 + 1
+                start_q = date(year, start_m, 1)
+                end_q = date(year, start_m + 3, 1) - timedelta(days=1)
+            return TimePlan(
+                time_expression="last quarter",
+                date_field=date_field,
+                operator="between",
+                start_date=start_q.isoformat(),
+                end_date=end_q.isoformat(),
+                relative_period="last_quarter",
+                relative_offset=-1,
+                granularity="quarter"
+            )
+
+        if "next quarter" in p:
+            q_idx = (month - 1) // 3
+            if q_idx == 3:
+                start_q = date(year + 1, 1, 1)
+                end_q = date(year + 1, 3, 31)
+            else:
+                start_m = (q_idx + 1) * 3 + 1
+                start_q = date(year, start_m, 1)
+                if start_m == 10: end_q = date(year, 12, 31)
+                else: end_q = date(year, start_m + 3, 1) - timedelta(days=1)
+            return TimePlan(
+                time_expression="next quarter",
+                date_field=date_field,
+                operator="between",
+                start_date=start_q.isoformat(),
+                end_date=end_q.isoformat(),
+                relative_period="next_quarter",
+                relative_offset=1,
+                granularity="quarter"
+            )
+
+        if "this year" in p:
+            return TimePlan(
+                time_expression="this year",
+                date_field=date_field,
+                operator="between",
+                start_date=f"{year}-01-01",
+                end_date=f"{year}-12-31",
+                relative_period="this_year",
+                relative_offset=0,
+                granularity="year"
+            )
+
+        if "last year" in p:
+            return TimePlan(
+                time_expression="last year",
+                date_field=date_field,
+                operator="between",
+                start_date=f"{year - 1}-01-01",
+                end_date=f"{year - 1}-12-31",
+                relative_period="last_year",
+                relative_offset=-1,
+                granularity="year"
+            )
+
+        if "next year" in p:
+            return TimePlan(
+                time_expression="next year",
+                date_field=date_field,
+                operator="between",
+                start_date=f"{year + 1}-01-01",
+                end_date=f"{year + 1}-12-31",
+                relative_period="next_year",
+                relative_offset=1,
+                granularity="year"
+            )
+
+        years_match = re.search(r"(?:last|past)\s+(\d+)\s+(?:financial\s+)?years?", p)
+        if years_match:
+            n_years = int(years_match.group(1))
+            return TimePlan(
+                time_expression=years_match.group(0),
+                date_field=date_field,
+                operator="between",
+                start_date=f"{year - n_years}-01-01",
+                end_date=f"{year}-12-31",
+                relative_period=f"last_{n_years}_years",
+                relative_offset=-n_years,
+                granularity="year"
+            )
+
+        months_dict = {
+            "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+            "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6,
+            "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+            "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12
+        }
+        month_range_match = re.search(r"(?:between|from)\s+([a-z]+)\s+(?:and|to|through)\s+([a-z]+)", p)
+        if month_range_match:
+            m1_name, m2_name = month_range_match.group(1), month_range_match.group(2)
+            if m1_name in months_dict and m2_name in months_dict:
+                m1, m2 = months_dict[m1_name], months_dict[m2_name]
+                start_d = date(year, m1, 1)
+                if m2 == 12: end_d = date(year, 12, 31)
+                else: end_d = date(year, m2 + 1, 1) - timedelta(days=1)
+                return TimePlan(
+                    time_expression=month_range_match.group(0),
+                    date_field=date_field,
+                    operator="between",
+                    start_date=start_d.isoformat(),
+                    end_date=end_d.isoformat(),
+                    relative_period="custom_range",
+                    granularity="month"
+                )
+
+        year_range_match = re.search(r"(?:between|from)\s+(\d{4})\s+(?:and|to|through)\s+(\d{4})", p)
+        if year_range_match:
+            y1, y2 = year_range_match.group(1), year_range_match.group(2)
+            return TimePlan(
+                time_expression=year_range_match.group(0),
+                date_field=date_field,
+                operator="between",
+                start_date=f"{y1}-01-01",
+                end_date=f"{y2}-12-31",
+                relative_period="custom_range",
+                granularity="year"
+            )
+
+        before_year_match = re.search(r"(?:before|prior to)\s+(\d{4})", p)
+        if before_year_match:
+            y = before_year_match.group(1)
+            return TimePlan(
+                time_expression=before_year_match.group(0),
+                date_field=date_field,
+                operator="<",
+                start_date=f"{y}-01-01",
+                end_date=f"{y}-01-01",
+                relative_period="custom_range",
+                granularity="year"
+            )
+
+        after_year_match = re.search(r"(?:after|since)\s+(\d{4})", p)
+        if after_year_match:
+            y = after_year_match.group(1)
+            return TimePlan(
+                time_expression=after_year_match.group(0),
+                date_field=date_field,
+                operator=">",
+                start_date=f"{y}-12-31",
+                end_date=f"{y}-12-31",
+                relative_period="custom_range",
+                granularity="year"
+            )
+
+        in_year_match = re.search(r"(?:in|during|for)\s+(\d{4})", p)
+        if in_year_match:
+            y = in_year_match.group(1)
+            return TimePlan(
+                time_expression=in_year_match.group(0),
+                date_field=date_field,
+                operator="between",
+                start_date=f"{y}-01-01",
+                end_date=f"{y}-12-31",
+                relative_period="custom_range",
+                granularity="year"
+            )
+
+        if "current financial year" in p or "this financial year" in p:
+            fy_start = f"{year}-04-01" if month >= 4 else f"{year - 1}-04-01"
+            fy_end = f"{year + 1}-03-31" if month >= 4 else f"{year}-03-31"
+            return TimePlan(
+                time_expression="current financial year",
+                date_field=date_field,
+                operator="between",
+                start_date=fy_start,
+                end_date=fy_end,
+                relative_period="current_financial_year",
+                granularity="year"
+            )
+
+        if "previous financial year" in p or "last financial year" in p:
+            fy_start = f"{year - 1}-04-01" if month >= 4 else f"{year - 2}-04-01"
+            fy_end = f"{year}-03-31" if month >= 4 else f"{year - 1}-03-31"
+            return TimePlan(
+                time_expression="previous financial year",
+                date_field=date_field,
+                operator="between",
+                start_date=fy_start,
+                end_date=fy_end,
+                relative_period="previous_financial_year",
+                granularity="year"
+            )
+
+        if "before covid" in p:
+            return TimePlan(
+                time_expression="before covid",
+                date_field=date_field,
+                operator="<",
+                start_date="2020-03-01",
+                end_date="2020-03-01",
+                relative_period="before_covid",
+                granularity="month"
+            )
+
+        if "after covid" in p:
+            return TimePlan(
+                time_expression="after covid",
+                date_field=date_field,
+                operator=">",
+                start_date="2020-01-01",
+                end_date="2020-01-01",
+                relative_period="after_covid",
+                granularity="month"
+            )
+
+        return None
+
 
 
 class JoinDetectionUtils:

@@ -62,6 +62,18 @@ class WindowFunctionConfig(BaseModel):
     alias: Optional[str] = Field(default="rank_num", description="Alias for the result column of the window function")
 
 
+class TimePlanConfig(BaseModel):
+    """Configuration for temporal planning metadata in StructuredQuery."""
+    time_expression: Optional[str] = Field(default=None, description="The natural language time phrase")
+    date_field: str = Field(description="The resolved date column name or expression")
+    operator: str = Field(description="The temporal comparison operator: '=', '!=', '>', '<', '>=', '<=', 'between', 'before', 'after', 'in'")
+    start_date: Optional[str] = Field(default=None, description="Start date in ISO format (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(default=None, description="End date in ISO format (YYYY-MM-DD)")
+    relative_period: Optional[str] = Field(default=None, description="Relative time period label")
+    relative_offset: Optional[int] = Field(default=None, description="Numeric offset in periods")
+    granularity: Optional[str] = Field(default=None, description="Time granularity: 'day', 'week', 'month', 'quarter', 'year'")
+
+
 class StructuredQuery(BaseModel):
     table: str = Field(description="The primary table to query from")
     joins: Optional[List[JoinCondition]] = Field(default=None, description="List of JOIN conditions")
@@ -88,5 +100,6 @@ class StructuredQuery(BaseModel):
         "The time bucket granularity for grouping: 'day', 'week', 'month', 'quarter', 'year'. "
         "Set this when the planner specifies time-based grouping."
     ))
+    time_plan: Optional[TimePlanConfig] = Field(default=None, description="Temporal planning configuration if query involves natural language time expressions")
     limit: Optional[int] = Field(default=50, description="Maximum number of rows to return")
     offset: Optional[int] = Field(default=0, description="Number of rows to skip")

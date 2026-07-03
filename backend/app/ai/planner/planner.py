@@ -60,7 +60,8 @@ class AIQueryPlanner:
         vague_phrases = ["vague", "unclear", "stuff", "what about", "tell me about", "just salary", "compare growth", "general info"]
         domain_keywords = [kw for kws in table_keywords.values() for kw in kws] + [
             "count", "average", "avg", "sum", "total", "max", "min", "top", "daily", "weekly", "monthly",
-            "quarterly", "annual", "trend", "budget", "show", "list", "find", "all", "*"
+            "quarterly", "annual", "trend", "budget", "show", "list", "find", "all", "*",
+            "before", "after", "between", "yesterday", "today", "tomorrow", "week", "month", "year"
         ]
         if any(vp in q_lower for vp in vague_phrases) or (len(q_lower.split()) <= 2 and not any(dk in q_lower for dk in domain_keywords)):
             logger.info("Heuristic planner detected ambiguous/vague query. Setting confidence < 0.70.")

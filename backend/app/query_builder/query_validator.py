@@ -287,4 +287,48 @@ class QueryValidator:
                 if not isinstance(query.window_function.frame, str) or not query.window_function.frame.strip():
                     raise ValueError("Window frame specification must be a non-empty string")
 
+        # Validate time_plan
+        if getattr(query, "time_plan", None):
+            tp = query.time_plan
+            _validate_col(tp.date_field)
+            valid_operators = {"=", "!=", ">", "<", ">=", "<=", "between", "before", "after", "in"}
+            if tp.operator.lower() not in valid_operators:
+                raise ValueError(f"Invalid temporal operator: '{tp.operator}'")
+            if tp.operator.lower() in ("between",) and not (tp.start_date and tp.end_date):
+                raise ValueError(f"Operator '{tp.operator}' in TimePlan requires both start_date and end_date")
+            if tp.operator.lower() in (">", "<", ">=", "<=", "before", "after") and not (tp.start_date or tp.end_date or tp.relative_period or tp.time_expression):
+                raise ValueError(f"Operator '{tp.operator}' in TimePlan requires a comparison date or expression")
+            if tp.relative_period and not isinstance(tp.relative_period, str):
+                raise ValueError("relative_period must be a string")
+
+            def _validate_iso_date(d_str: str, label: str):
+                if not d_str:
+                    return
+                if any(kw in str(d_str).lower() for kw in ("current", "now", "today", "yesterday", "tomorrow", "interval", "start", "end", "resolved")):
+                    return
+                try:
+                    from datetime import date, datetime
+                    if "T" in str(d_str) or " " in str(d_str):
+                        datetime.fromisoformat(str(d_str))
+                    else:
+                        date.fromisoformat(str(d_str))
+                except ValueError:
+                    raise ValueError(f"Invalid {label} format in TimePlan: '{d_str}'. Expected ISO format YYYY-MM-DD.")
+
+            _validate_iso_date(getattr(tp, "start_date", None), "start_date")
+            _validate_iso_date(getattr(tp, "end_date", None), "end_date")
+
+            if getattr(tp, "start_date", None) and getattr(tp, "end_date", None):
+                try:
+                    from datetime import date
+                    s_d = date.fromisoformat(str(tp.start_date)[:10])
+                    e_d = date.fromisoformat(str(tp.end_date)[:10])
+                    if s_d > e_d:
+                        raise ValueError(f"Invalid date range in TimePlan: start_date '{tp.start_date}' is after end_date '{tp.end_date}'")
+                except ValueError as e:
+                    if "Invalid date range" in str(e):
+                        raise
+                except Exception:
+                    pass
+
         return True

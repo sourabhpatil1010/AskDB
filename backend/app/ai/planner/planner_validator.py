@@ -3,7 +3,7 @@ from typing import List, Set, Dict
 
 from app.models import Base
 from app.ai.planner.planner_schema import ExecutionPlan, PlannerClarificationException
-from app.ai.planner.planner_utils import JoinDetectionUtils, QueryDecompositionUtils, BusinessRuleUtils, TimeReasoningUtils, SYSTEM_TABLES, SchemaColumnResolver
+from app.ai.planner.planner_utils import JoinDetectionUtils, QueryDecompositionUtils, BusinessRuleUtils, TimeReasoningUtils, TimeSemanticUtils, SYSTEM_TABLES, SchemaColumnResolver
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,9 @@ class PlannerValidator:
                 if tf.field not in existing_fields:
                     existing_filters.append(tf)
             plan.filters = existing_filters
+
+        if not plan.time_plan:
+            plan.time_plan = TimeSemanticUtils.analyze(original_query, plan.tables)
 
         # 5. Enrich Business Rules
         rules = BusinessRuleUtils.interpret_rules(original_query)
