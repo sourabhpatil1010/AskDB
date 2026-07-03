@@ -352,6 +352,13 @@ class QueryValidator:
                 valid_aggs = {"avg", "sum", "count", "min", "max"}
                 if sp.aggregate_function.lower() not in valid_aggs:
                     raise ValueError(f"Invalid aggregate function in SubqueryPlan: '{sp.aggregate_function}'")
+                if sp.subquery_type.lower() == "scalar" and sp.aggregate_function.lower() in ("avg", "sum") and sp.target_table and sp.target_column and sp.target_column != "id":
+                    tbl_obj = Base.metadata.tables.get(sp.target_table)
+                    if tbl_obj is not None and sp.target_column in tbl_obj.columns:
+                        import sqlalchemy as sa
+                        col_type = tbl_obj.columns[sp.target_column].type
+                        if not isinstance(col_type, (sa.Numeric, sa.Integer, sa.Float, sa.BigInteger, sa.SmallInteger)):
+                            raise ValueError(f"Aggregate function '{sp.aggregate_function}' cannot be applied to non-numeric column '{sp.target_table}.{sp.target_column}'")
             if sp.correlation_columns:
                 for col in sp.correlation_columns:
                     _validate_col(col)

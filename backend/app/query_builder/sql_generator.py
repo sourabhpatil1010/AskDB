@@ -187,9 +187,10 @@ class SQLGenerator:
         param_counter: int,
         parameters: Dict[str, Any],
         param_field_map: Dict[str, tuple[str, str]],
-        time_plan: Any = None
+        time_plan: Any = None,
+        subquery_plan: Any = None
     ) -> Tuple[str | None, int]:
-        if not filters and not time_plan:
+        if not filters and not time_plan and not subquery_plan:
             return None, param_counter
         from app.ai.planner.planner_utils import SchemaColumnResolver
         where_clauses = []
@@ -260,6 +261,13 @@ class SQLGenerator:
             if time_sql:
                 where_clauses.append(time_sql)
                 param_counter += 1
+
+        if subquery_plan:
+            subq_sql, param_counter = self.compile_subquery(
+                subquery_plan, all_tbls, default_table, param_counter, parameters, param_field_map
+            )
+            if subq_sql:
+                where_clauses.append(subq_sql)
 
         if not where_clauses:
             return None, param_counter
@@ -378,6 +386,310 @@ class SQLGenerator:
             expr += f" AS {wf.alias}"
         return expr
 
+    def _resolve_subquery_link_columns(self, outer_tbl: str, inner_tbl: str, target_col: str | None = None) -> tuple[str, str]:
+        """Resolve (outer_column, inner_column) for linking outer table to subquery target table using SQLAlchemy metadata."""
+        from app.models import Base
+        if outer_tbl == inner_tbl:
+            col = target_col or "id"
+            return f"{outer_tbl}.{col}", f"{inner_tbl}.{col}"
+            
+        tbl_in = Base.metadata.tables.get(inner_tbl)
+        if tbl_in is not None:
+            for fk in tbl_in.foreign_keys:
+                if fk.column.table.name == outer_tbl:
+                    if not target_col or target_col == fk.parent.name or target_col == fk.column.name:
+                        return f"{outer_tbl}.{fk.column.name}", f"{inner_tbl}.{fk.parent.name}"
+        tbl_out = Base.metadata.tables.get(outer_tbl)
+        if tbl_out is not None:
+            for fk in tbl_out.foreign_keys:
+                if fk.column.table.name == inner_tbl:
+                    if not target_col or target_col == fk.column.name or target_col == fk.parent.name:
+                        return f"{outer_tbl}.{fk.parent.name}", f"{inner_tbl}.{fk.column.name}"
+                        
+        if target_col:
+            out_obj = Base.metadata.tables.get(outer_tbl)
+            in_obj = Base.metadata.tables.get(inner_tbl)
+            out_cols = [c.name for c in out_obj.columns] if out_obj is not None else []
+            in_cols = [c.name for c in in_obj.columns] if in_obj is not None else []
+            if target_col in out_cols and target_col in in_cols:
+                return f"{outer_tbl}.{target_col}", f"{inner_tbl}.{target_col}"
+            if target_col in in_cols:
+                return f"{outer_tbl}.id", f"{inner_tbl}.{target_col}"
+            if target_col in out_cols:
+                return f"{outer_tbl}.{target_col}", f"{inner_tbl}.id"
+                
+        return f"{outer_tbl}.id", f"{inner_tbl}.id"
+
+    def compile_scalar_subquery(
+        self,
+        sp: Any,
+        outer_tables: list[str],
+        default_table: str,
+        param_counter: int,
+        parameters: Dict[str, Any],
+        param_field_map: Dict[str, tuple[str, str]]
+    ) -> Tuple[str, int]:
+        from app.ai.planner.planner_utils import SchemaColumnResolver
+        lhs_col = SchemaColumnResolver.qualify_column(sp.target_column or "id", outer_tables, default_table=default_table)
+        op = sp.comparison_operator or ">"
+        agg = (sp.aggregate_function or "AVG").upper()
+        
+        subq_table = sp.target_table or default_table
+        subq_col = SchemaColumnResolver.qualify_column(sp.target_column or "id", [subq_table], default_table=subq_table)
+        
+        subq_sql = f"SELECT {agg}({subq_col}) FROM {subq_table}"
+        
+        where_str, param_counter = self._build_where_clause(
+            sp.filters, [subq_table], subq_table, param_counter, parameters, param_field_map
+        )
+        if where_str:
+            subq_sql += f" {where_str}"
+            
+        return f"{lhs_col} {op} ({subq_sql})", param_counter
+
+    def compile_correlated_subquery(
+        self,
+        sp: Any,
+        outer_tables: list[str],
+        default_table: str,
+        param_counter: int,
+        parameters: Dict[str, Any],
+        param_field_map: Dict[str, tuple[str, str]]
+    ) -> Tuple[str, int]:
+        from app.ai.planner.planner_utils import SchemaColumnResolver
+        outer_tbl = getattr(sp, "outer_table", None) or (outer_tables[0] if outer_tables else default_table)
+        target_col = getattr(sp, "target_column", None) or "id"
+        outer_col = getattr(sp, "outer_column", None) or target_col
+        
+        lhs_col = SchemaColumnResolver.qualify_column(outer_col, [outer_tbl], default_table=outer_tbl)
+        op = getattr(sp, "comparison_operator", None) or ">"
+        agg = (getattr(sp, "aggregate_function", None) or "").upper()
+        
+        subq_table = getattr(sp, "target_table", None) or default_table
+        alias = getattr(sp, "alias", None) or (f"{subq_table[:1]}2" if subq_table else "subq")
+        
+        subq_col = f"{alias}.{target_col}"
+        if agg and agg not in ("NONE", "NULL", ""):
+            subq_select = f"{agg}({subq_col})"
+        else:
+            subq_select = subq_col
+            
+        subq_sql = f"SELECT {subq_select} FROM {subq_table} AS {alias}"
+        
+        corr_cols = getattr(sp, "correlation_columns", None) or ["department_id"]
+        where_clauses = [f"{alias}.{col} = {outer_tbl}.{col}" for col in corr_cols]
+        
+        filter_str, param_counter = self._build_where_clause(
+            getattr(sp, "filters", None), [alias], alias, param_counter, parameters, param_field_map
+        )
+        if filter_str:
+            if filter_str.upper().startswith("WHERE "):
+                filter_str = filter_str[6:]
+            where_clauses.append(filter_str)
+            
+        if where_clauses:
+            subq_sql += " WHERE " + " AND ".join(where_clauses)
+            
+        return f"{lhs_col} {op} ({subq_sql})", param_counter
+
+    def compile_in_subquery(
+        self,
+        sp: Any,
+        outer_tables: list[str],
+        default_table: str,
+        param_counter: int,
+        parameters: Dict[str, Any],
+        param_field_map: Dict[str, tuple[str, str]]
+    ) -> Tuple[str, int]:
+        from app.ai.planner.planner_utils import SchemaColumnResolver
+        outer_tbl = default_table
+        subq_table = sp.target_table or default_table
+        outer_col, inner_col = self._resolve_subquery_link_columns(outer_tbl, subq_table, sp.target_column)
+        op = sp.comparison_operator or "IN"
+        
+        subq_sql = f"SELECT {inner_col} FROM {subq_table}"
+        
+        where_str, param_counter = self._build_where_clause(
+            sp.filters, [subq_table], subq_table, param_counter, parameters, param_field_map
+        )
+        if where_str:
+            subq_sql += f" {where_str}"
+            
+        if sp.group_by:
+            subq_gb = [SchemaColumnResolver.qualify_column(gb, [subq_table], default_table=subq_table) for gb in sp.group_by]
+            subq_sql += " GROUP BY " + ", ".join(subq_gb)
+            
+        if sp.having:
+            having_parts = []
+            for h in sp.having:
+                col_expr = getattr(h, "column", None) or getattr(h, "metric", "COUNT(*)")
+                if "(" not in col_expr and col_expr.lower() != "count":
+                    col_expr = f"COUNT({col_expr})"
+                elif col_expr.lower() == "count":
+                    col_expr = "COUNT(*)"
+                val_str = str(int(h.value)) if isinstance(h.value, float) and h.value.is_integer() else str(h.value)
+                having_parts.append(f"{col_expr} {h.operator} {val_str}")
+            if having_parts:
+                subq_sql += " HAVING " + " AND ".join(having_parts)
+            
+        if sp.order_by:
+            order_parts = []
+            for o in sp.order_by:
+                fld = getattr(o, "field", None) or getattr(o, "column", "id")
+                dir_str = getattr(o, "direction", "asc").upper()
+                order_parts.append(f"{fld} {dir_str}")
+            subq_sql += " ORDER BY " + ", ".join(order_parts)
+            
+        if sp.limit:
+            subq_sql += f" LIMIT {sp.limit}"
+            
+        return f"{outer_col} {op} ({subq_sql})", param_counter
+
+    def compile_not_in_subquery(
+        self,
+        sp: Any,
+        outer_tables: list[str],
+        default_table: str,
+        param_counter: int,
+        parameters: Dict[str, Any],
+        param_field_map: Dict[str, tuple[str, str]]
+    ) -> Tuple[str, int]:
+        outer_tbl = default_table
+        subq_table = sp.target_table or default_table
+        outer_col, inner_col = self._resolve_subquery_link_columns(outer_tbl, subq_table, sp.target_column)
+        op = "NOT IN"
+        
+        subq_sql = f"SELECT {inner_col} FROM {subq_table}"
+        
+        where_str, param_counter = self._build_where_clause(
+            sp.filters, [subq_table], subq_table, param_counter, parameters, param_field_map
+        )
+        if where_str:
+            subq_sql += f" {where_str}"
+            
+        return f"{outer_col} {op} ({subq_sql})", param_counter
+
+    def compile_exists_subquery(
+        self,
+        sp: Any,
+        outer_tables: list[str],
+        default_table: str,
+        param_counter: int,
+        parameters: Dict[str, Any],
+        param_field_map: Dict[str, tuple[str, str]]
+    ) -> Tuple[str, int]:
+        outer_tbl = default_table
+        subq_table = sp.target_table or default_table
+        
+        subq_sql = f"SELECT 1 FROM {subq_table}"
+        
+        where_clauses = []
+        if sp.filters:
+            where_str, param_counter = self._build_where_clause(
+                sp.filters, [subq_table], subq_table, param_counter, parameters, param_field_map
+            )
+            if where_str:
+                where_clauses.append(where_str[6:].strip())
+                
+        if outer_tbl != subq_table:
+            outer_col, inner_col = self._resolve_subquery_link_columns(outer_tbl, subq_table, sp.target_column)
+            where_clauses.append(f"{inner_col} = {outer_col}")
+            
+        if where_clauses:
+            subq_sql += " WHERE " + " AND ".join(where_clauses)
+            
+        return f"EXISTS ({subq_sql})", param_counter
+
+    def compile_not_exists_subquery(
+        self,
+        sp: Any,
+        outer_tables: list[str],
+        default_table: str,
+        param_counter: int,
+        parameters: Dict[str, Any],
+        param_field_map: Dict[str, tuple[str, str]]
+    ) -> Tuple[str, int]:
+        outer_tbl = default_table
+        subq_table = sp.target_table or default_table
+        
+        subq_sql = f"SELECT 1 FROM {subq_table}"
+        
+        where_clauses = []
+        if sp.filters:
+            where_str, param_counter = self._build_where_clause(
+                sp.filters, [subq_table], subq_table, param_counter, parameters, param_field_map
+            )
+            if where_str:
+                where_clauses.append(where_str[6:].strip())
+                
+        if outer_tbl != subq_table:
+            outer_col, inner_col = self._resolve_subquery_link_columns(outer_tbl, subq_table, sp.target_column)
+            where_clauses.append(f"{inner_col} = {outer_col}")
+            
+        if where_clauses:
+            subq_sql += " WHERE " + " AND ".join(where_clauses)
+            
+        return f"NOT EXISTS ({subq_sql})", param_counter
+
+    def compile_table_subquery(
+        self,
+        sp: Any,
+        outer_tables: list[str],
+        default_table: str,
+        param_counter: int,
+        parameters: Dict[str, Any],
+        param_field_map: Dict[str, tuple[str, str]]
+    ) -> Tuple[str, int]:
+        subq_table = sp.target_table or default_table
+        subq_sql = f"SELECT * FROM {subq_table}"
+        
+        where_str, param_counter = self._build_where_clause(
+            sp.filters, [subq_table], subq_table, param_counter, parameters, param_field_map
+        )
+        if where_str:
+            subq_sql += f" {where_str}"
+            
+        alias = getattr(sp, "alias", None) or "subq"
+        return f"({subq_sql}) AS {alias}", param_counter
+
+    def compile_subquery(
+        self,
+        sp: Any,
+        outer_tables: list[str],
+        default_table: str,
+        param_counter: int,
+        parameters: Dict[str, Any],
+        param_field_map: Dict[str, tuple[str, str]]
+    ) -> Tuple[str | None, int]:
+        stype = (getattr(sp, "subquery_type", None) or "").lower()
+        if stype == "correlated" or (getattr(sp, "correlation_columns", None) and stype not in ("in", "not_in", "exists", "not_exists", "table")):
+            return self.compile_correlated_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+        elif stype == "scalar":
+            return self.compile_scalar_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+        elif stype == "in":
+            return self.compile_in_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+        elif stype == "not_in":
+            return self.compile_not_in_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+        elif stype == "exists":
+            return self.compile_exists_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+        elif stype == "not_exists":
+            return self.compile_not_exists_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+        elif stype == "table":
+            return self.compile_table_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+        else:
+            op = (getattr(sp, "comparison_operator", "") or "").upper()
+            if "NOT IN" in op:
+                return self.compile_not_in_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+            elif "IN" in op:
+                return self.compile_in_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+            elif "NOT EXISTS" in op:
+                return self.compile_not_exists_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+            elif "EXISTS" in op:
+                return self.compile_exists_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+            elif any(c in op for c in (">", "<", "=")):
+                return self.compile_scalar_subquery(sp, outer_tables, default_table, param_counter, parameters, param_field_map)
+            return None, param_counter
+
     def generate(self, query: StructuredQuery) -> Tuple[str, Dict[str, Any]]:
         from app.query_builder.query_validator import resolve_synthetic_columns
         resolve_synthetic_columns(query)
@@ -394,7 +706,12 @@ class SQLGenerator:
 
 
         from app.ai.planner.planner_utils import SchemaColumnResolver
-        all_tbls = [query.table] + [j.table for j in (query.joins or [])]
+        active_joins = list(query.joins or [])
+        sp = getattr(query, "subquery_plan", None)
+        if sp and sp.target_table and sp.subquery_type.lower() in ("in", "not_in", "exists", "not_exists", "table"):
+            if sp.target_table != query.table:
+                active_joins = [j for j in active_joins if j.table != sp.target_table]
+        all_tbls = [query.table] + [j.table for j in active_joins]
         logger.info("--- DEBUG: BEFORE SQL GENERATION ---")
         logger.info(f"Tables: {all_tbls}")
         logger.info(f"Columns: {query.columns}")
@@ -422,11 +739,11 @@ class SQLGenerator:
         sql_parts.append(self._build_from_clause(query.table))
 
         # JOINS
-        sql_parts.extend(self._build_join_clause(query.joins))
+        sql_parts.extend(self._build_join_clause(active_joins))
 
         # WHERE
         where_str, param_counter = self._build_where_clause(
-            query.filters, all_tbls, query.table, param_counter, parameters, param_field_map, time_plan=getattr(query, "time_plan", None)
+            query.filters, all_tbls, query.table, param_counter, parameters, param_field_map, time_plan=getattr(query, "time_plan", None), subquery_plan=sp
         )
         if where_str:
             sql_parts.append(where_str)
@@ -613,12 +930,19 @@ class SQLGenerator:
         param_counter = 1
 
         all_tbls = [query.table] + [j.table for j in (query.joins or [])]
+        active_joins = list(query.joins or [])
+        sp = getattr(query, "subquery_plan", None)
+        if sp and sp.target_table and sp.subquery_type.lower() in ("in", "not_in", "exists", "not_exists", "table"):
+            if sp.target_table != query.table:
+                active_joins = [j for j in active_joins if j.table != sp.target_table]
+        all_tbls = [query.table] + [j.table for j in active_joins]
+
         sql_parts.append(self._build_select_clause(query.columns or [], all_tbls, query.table, win_expr=win_expr))
         sql_parts.append(self._build_from_clause(query.table))
-        sql_parts.extend(self._build_join_clause(query.joins))
+        sql_parts.extend(self._build_join_clause(active_joins))
         
         where_str, param_counter = self._build_where_clause(
-            query.filters, all_tbls, query.table, param_counter, parameters, param_field_map, time_plan=getattr(query, "time_plan", None)
+            query.filters, all_tbls, query.table, param_counter, parameters, param_field_map, time_plan=getattr(query, "time_plan", None), subquery_plan=sp
         )
         if where_str:
             sql_parts.append(where_str)

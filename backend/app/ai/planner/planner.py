@@ -61,7 +61,7 @@ class AIQueryPlanner:
             "count", "average", "avg", "sum", "total", "max", "min", "top", "daily", "weekly", "monthly",
             "quarterly", "annual", "trend", "budget", "show", "list", "find", "all", "*",
             "before", "after", "between", "yesterday", "today", "tomorrow", "week", "month", "year",
-            "above", "below", "without", "never", "no", "more", "less", "whose", "having", "company", "department", "manager", "bonus", "budget", "leave", "projects"
+            "above", "below", "without", "never", "no", "more", "less", "whose", "having", "company", "department", "manager", "bonus", "budget", "leave", "projects", "with", "exists"
         ]
         if any(vp in q_lower for vp in vague_phrases) or (len(q_lower.split()) <= 2 and not any(dk in q_lower for dk in domain_keywords)):
             logger.info("Heuristic planner detected ambiguous/vague query. Setting confidence < 0.70.")
@@ -76,10 +76,16 @@ class AIQueryPlanner:
             )
 
         # 2. Table Detection
-        detected_tables = []
+        table_match_indices = {}
         for t_name, keywords in table_keywords.items():
-            if any(kw in q_lower for kw in keywords):
-                detected_tables.append(t_name)
+            min_idx = -1
+            for kw in keywords:
+                idx = q_lower.find(kw)
+                if idx != -1 and (min_idx == -1 or idx < min_idx):
+                    min_idx = idx
+            if min_idx != -1:
+                table_match_indices[t_name] = min_idx
+        detected_tables = sorted(table_match_indices.keys(), key=lambda t: table_match_indices[t])
         if not detected_tables:
             detected_tables = ["employees"]
         
