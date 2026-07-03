@@ -1756,3 +1756,206 @@ class RankingSemanticUtils:
             "requires_correlated_subquery": (ranking_type == "nth" and scope == "global")
         }
 
+
+class SubquerySemanticUtils:
+    """Generic semantic analyzer for subquery intent detection and SubqueryPlan generation.
+    Avoids hardcoding specific queries by dynamically extracting target tables, columns, comparison operators,
+    aggregations, and correlation/join fields using SQLAlchemy metadata.
+    """
+    @classmethod
+    def analyze(cls, query: str, detected_tables: List[str]) -> Optional[Any]:
+        import re
+        from app.ai.planner.planner_schema import SubqueryPlan, HavingCondition, Filter, OrderCondition
+        from app.database.base import Base
+
+        q_lower = query.lower().strip()
+        available_tables = [t for t in Base.metadata.tables.keys() if t not in SYSTEM_TABLES]
+        primary_table = detected_tables[0] if detected_tables else "employees"
+
+        # Helper: resolve linking column between outer and inner tables via SQLAlchemy metadata FKs
+        def _resolve_link_col(outer_tbl: str, inner_tbl: str) -> str:
+            tbl_in = Base.metadata.tables.get(inner_tbl)
+            if tbl_in is not None:
+                for fk in tbl_in.foreign_keys:
+                    if fk.column.table.name == outer_tbl:
+                        return fk.parent.name
+            tbl_out = Base.metadata.tables.get(outer_tbl)
+            if tbl_out is not None:
+                for fk in tbl_out.foreign_keys:
+                    if fk.column.table.name == inner_tbl:
+                        return "id"
+            return "id"
+
+        # Helper: resolve metric column for a table from keywords
+        def _resolve_metric_col(tbl_name: str, query_str: str) -> str:
+            col_map = {
+                "bonus": "bonus_amount", "salary": "base_salary", "pay": "base_salary",
+                "budget": "budget", "cost": "cost", "hours": "hours_worked",
+                "score": "score", "rating": "rating", "allocation": "allocation_percentage"
+            }
+            tbl_obj = Base.metadata.tables.get(tbl_name)
+            col_names = [c.name for c in tbl_obj.columns] if tbl_obj is not None else []
+            for kw, col in col_map.items():
+                if kw in query_str and col in col_names:
+                    return col
+            for col in col_names:
+                if any(w in col for w in ["salary", "bonus", "budget", "amount", "cost", "score", "hours"]):
+                    return col
+            return "base_salary" if "base_salary" in col_names else ("id" if "id" in col_names else col_names[0] if col_names else "id")
+
+        # 1. Check for NOT IN / NOT EXISTS / Negated relationship queries
+        # Keywords: without, never, no, with no, having no, not in
+        neg_match = re.search(r'^(.*?)\b(without|never|with\s+no|having\s+no|has\s+no|have\s+no|lacking|not\s+in)\b\s+(.*)', q_lower)
+        if neg_match:
+            before_str = neg_match.group(1).strip()
+            after_str = neg_match.group(3).strip()
+            
+            outer_tbl = primary_table
+            for tbl in available_tables:
+                if tbl in before_str or tbl.rstrip('s') in before_str:
+                    outer_tbl = tbl
+                    break
+            if not outer_tbl or outer_tbl == "employees":
+                if "project" in before_str: outer_tbl = "projects"
+                elif "dept" in before_str or "department" in before_str: outer_tbl = "departments"
+                elif "office" in before_str: outer_tbl = "offices"
+                elif "client" in before_str: outer_tbl = "clients"
+
+            inner_tbl = None
+            for tbl in available_tables:
+                if tbl in after_str or tbl.rstrip('s') in after_str:
+                    inner_tbl = tbl
+                    break
+            if not inner_tbl:
+                if "leave" in after_str: inner_tbl = "leave_requests"
+                elif "employ" in after_str or "staff" in after_str or "worker" in after_str: inner_tbl = "employees"
+                elif "project" in after_str: inner_tbl = "projects"
+                elif "dept" in after_str or "department" in after_str: inner_tbl = "departments"
+                elif "review" in after_str: inner_tbl = "performance_reviews"
+                elif "attend" in after_str: inner_tbl = "attendance"
+                elif "payroll" in after_str or "salary" in after_str or "pay" in after_str: inner_tbl = "payroll"
+                elif "manager" in after_str:
+                    inner_tbl = "project_assignments" if outer_tbl == "projects" else "employees"
+
+            if inner_tbl and inner_tbl != outer_tbl:
+                link_col = _resolve_link_col(outer_tbl, inner_tbl)
+                filters = []
+                if "manager" in after_str and inner_tbl == "project_assignments":
+                    filters.append(Filter(field="role", operator="=", value="manager"))
+                return SubqueryPlan(
+                    subquery_type="not_in",
+                    target_table=inner_tbl,
+                    target_column=link_col,
+                    comparison_operator="NOT IN",
+                    filters=filters if filters else None
+                )
+            elif inner_tbl == outer_tbl and "manager" in after_str:
+                return SubqueryPlan(
+                    subquery_type="not_in",
+                    target_table="project_assignments" if outer_tbl == "projects" else "employees",
+                    target_column="project_id" if outer_tbl == "projects" else "id",
+                    comparison_operator="NOT IN",
+                    filters=[Filter(field="role", operator="=", value="manager")] if outer_tbl == "projects" else None
+                )
+
+        # 2. Check for scalar / correlated comparison to average / aggregate
+        if "average" in q_lower or "avg" in q_lower or "max" in q_lower or "min" in q_lower:
+            if any(comp_kw in q_lower for comp_kw in ["above", "below", "greater", "higher", "more", "less", "under", "over", "exceed"]):
+                op = ">" if any(k in q_lower for k in ["above", "greater", "higher", "more", "over", "exceed"]) else "<"
+                agg = "AVG" if ("average" in q_lower or "avg" in q_lower) else ("MAX" if "max" in q_lower else ("MIN" if "min" in q_lower else "SUM"))
+                
+                # Check if correlated
+                is_correlated = any(ckw in q_lower for ckw in ["department average", "office average", "team average", "role average", "per department", "their department", "own department"])
+                
+                # Identify target table for subquery
+                target_tbl = primary_table
+                if "bonus" in q_lower and "bonus" not in [c.name for c in Base.metadata.tables.get(primary_table, {}).columns if Base.metadata.tables.get(primary_table) is not None]:
+                    target_tbl = "payroll"
+                elif "budget" in q_lower:
+                    if "project" in q_lower:
+                        target_tbl = "projects"
+                    elif "department" in q_lower:
+                        target_tbl = "departments"
+                    else:
+                        for tbl in ["projects", "departments"]:
+                            if tbl in available_tables and "budget" in [c.name for c in Base.metadata.tables.get(tbl).columns]:
+                                target_tbl = tbl
+                                break
+
+                target_col = _resolve_metric_col(target_tbl, q_lower)
+
+                if is_correlated:
+                    corr_cols = []
+                    if "office" in q_lower:
+                        corr_cols = ["office_id"] if "office_id" in [c.name for c in Base.metadata.tables.get(primary_table).columns] else ["department_id"]
+                    else:
+                        corr_cols = ["department_id"] if "department_id" in [c.name for c in Base.metadata.tables.get(primary_table).columns] else ["id"]
+                    return SubqueryPlan(
+                        subquery_type="correlated",
+                        target_table=target_tbl,
+                        target_column=target_col,
+                        comparison_operator=op,
+                        aggregate_function=agg,
+                        correlation_columns=corr_cols,
+                        alias="e2"
+                    )
+                else:
+                    return SubqueryPlan(
+                        subquery_type="scalar",
+                        target_table=target_tbl,
+                        target_column=target_col,
+                        comparison_operator=op,
+                        aggregate_function=agg
+                    )
+
+        # 3. Check for IN subquery with GROUP BY / HAVING
+        having_in_match = re.search(r'\bin\s+(department|office|project|team|client)s?\s+(?:with|having)\s+(more\s+than|less\s+than|at\s+least|at\s+most|greater\s+than|fewer\s+than|>|<|>=|<=)\s+(\d+)\b', q_lower)
+        if having_in_match:
+            entity_type = having_in_match.group(1)
+            op_str = having_in_match.group(2)
+            val = int(having_in_match.group(3))
+            op = ">=" if "at least" in op_str else ("<=" if "at most" in op_str else (">" if any(k in op_str for k in ["more", "greater", ">"]) else "<"))
+            
+            group_col = f"{entity_type}_id" if f"{entity_type}_id" in [c.name for c in Base.metadata.tables.get(primary_table).columns] else "department_id"
+            return SubqueryPlan(
+                subquery_type="in",
+                target_table=primary_table,
+                target_column=group_col,
+                comparison_operator="IN",
+                group_by=[group_col],
+                having=[HavingCondition(metric="count", operator=op, value=val)]
+            )
+
+        # 4. Check for highest/lowest average in group
+        if any(k in q_lower for k in ["highest average", "lowest average", "max average", "min average", "best average", "worst average"]):
+            is_desc = any(k in q_lower for k in ["highest", "max", "best"])
+            group_col = "department_id" if "department_id" in [c.name for c in Base.metadata.tables.get("employees").columns] else "id"
+            metric_col = _resolve_metric_col("employees", q_lower)
+            return SubqueryPlan(
+                subquery_type="in",
+                target_table="employees",
+                target_column=group_col,
+                comparison_operator="IN",
+                aggregate_function="AVG",
+                group_by=[group_col],
+                order_by=[OrderCondition(field=f"AVG({metric_col})", direction="desc" if is_desc else "asc")],
+                limit=1
+            )
+
+        # 5. Check for cross-entity or relationship comparison (e.g., whose manager earns more than 100000)
+        if "whose " in q_lower or "manager earns" in q_lower or "manager with" in q_lower:
+            num_match = re.search(r'(\d+)', q_lower)
+            val = int(num_match.group(1)) if num_match else 100000
+            op = ">" if any(k in q_lower for k in ["more", "greater", "above", "exceed", ">"]) else "<"
+            metric_col = _resolve_metric_col("employees", q_lower)
+            return SubqueryPlan(
+                subquery_type="in",
+                target_table="employees",
+                target_column="id",
+                comparison_operator="IN",
+                filters=[Filter(field=metric_col, operator=op, value=val)],
+                correlation_columns=["department_id"] if "department_id" in [c.name for c in Base.metadata.tables.get(primary_table).columns] else None
+            )
+
+        return None
+

@@ -68,6 +68,23 @@ class TimePlan(BaseModel):
     granularity: Optional[str] = Field(default=None, description="Time granularity: 'day', 'week', 'month', 'quarter', 'year'")
 
 
+class SubqueryPlan(BaseModel):
+    """Generic subquery planning metadata carried from AI Planner to JSON Generator."""
+    subquery_type: str = Field(description="Type of subquery: 'scalar', 'in', 'not_in', 'exists', 'not_exists', 'correlated', 'table'")
+    target_table: Optional[str] = Field(default=None, description="The table queried inside the subquery, e.g. 'employees' or 'leave_requests'")
+    target_column: Optional[str] = Field(default=None, description="The column selected or aggregated in the subquery, e.g. 'salary' or 'department_id'")
+    comparison_operator: Optional[str] = Field(default=None, description="Comparison operator linking outer query to subquery: '>', '<', '>=', '<=', '=', '!=', 'in', 'not in', 'exists', 'not exists'")
+    aggregate_function: Optional[str] = Field(default=None, description="Aggregate function applied in the subquery, e.g. 'AVG', 'MAX', 'MIN', 'SUM', 'COUNT'")
+    correlation_columns: Optional[List[str]] = Field(default=None, description="Columns linking inner subquery to outer query for correlated subqueries, e.g. ['department_id']")
+    join_columns: Optional[List[str]] = Field(default=None, description="Join columns if subquery involves joining or linking tables")
+    alias: Optional[str] = Field(default=None, description="Optional alias for the subquery or correlated reference, e.g. 'subq' or 'e2'")
+    group_by: Optional[List[str]] = Field(default=None, description="Optional group by columns within the subquery")
+    having: Optional[List[HavingCondition]] = Field(default=None, description="Optional having conditions within the subquery")
+    filters: Optional[List[Filter]] = Field(default=None, description="Optional filters applied inside the subquery")
+    order_by: Optional[List[OrderCondition]] = Field(default=None, description="Optional ordering rules inside the subquery")
+    limit: Optional[int] = Field(default=None, description="Optional row limit inside the subquery")
+
+
 class ExecutionPlan(BaseModel):
     intent: Union[IntentEnum, str] = Field(description="The primary business intent of the query")
     tables: List[str] = Field(description="List of database tables required for this query")
@@ -79,6 +96,7 @@ class ExecutionPlan(BaseModel):
     group_by: Optional[List[str]] = Field(default=None, description="List of columns or time granularity labels to group by (e.g., 'department', 'month', 'quarter')")
     time_granularity: Optional[str] = Field(default=None, description="Time bucket granularity for grouping: 'day', 'week', 'month', 'quarter', 'year'. Set when user asks to group by a time period.")
     time_plan: Optional[TimePlan] = Field(default=None, description="Temporal planning metadata if the query involves natural language time expressions")
+    subquery_plan: Optional[SubqueryPlan] = Field(default=None, description="Subquery planning metadata if the query requires a subquery")
     having: Optional[List[HavingCondition]] = Field(default=None, description="List of HAVING conditions for aggregated results")
     order_by: Optional[List[OrderCondition]] = Field(default=None, description="Sorting rules")
     limit: Optional[int] = Field(default=None, description="Maximum number of rows to return, e.g. Top 5, Top 10")

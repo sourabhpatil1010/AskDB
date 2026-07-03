@@ -8,7 +8,7 @@ from app.ai.planner.planner_schema import (
 )
 from app.ai.planner.planner_chain import PlannerChain
 from app.ai.planner.planner_validator import PlannerValidator
-from app.ai.planner.planner_utils import TimeReasoningUtils, JoinDetectionUtils, BusinessRuleUtils, QueryDecompositionUtils, RankingSemanticUtils, AnalyticalWindowSemanticUtils, SYSTEM_TABLES
+from app.ai.planner.planner_utils import TimeReasoningUtils, JoinDetectionUtils, BusinessRuleUtils, QueryDecompositionUtils, RankingSemanticUtils, AnalyticalWindowSemanticUtils, SubquerySemanticUtils, SYSTEM_TABLES
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,6 @@ class AIQueryPlanner:
     def __init__(self):
         self.chain = PlannerChain()
         self.validator = PlannerValidator()
-        self.known_tables = [t for t in Base.metadata.tables.keys() if t not in SYSTEM_TABLES]
 
     async def plan(self, natural_language: str) -> ExecutionPlan:
         """Generates, validates, and enriches an ExecutionPlan from natural language."""
@@ -61,7 +60,8 @@ class AIQueryPlanner:
         domain_keywords = [kw for kws in table_keywords.values() for kw in kws] + [
             "count", "average", "avg", "sum", "total", "max", "min", "top", "daily", "weekly", "monthly",
             "quarterly", "annual", "trend", "budget", "show", "list", "find", "all", "*",
-            "before", "after", "between", "yesterday", "today", "tomorrow", "week", "month", "year"
+            "before", "after", "between", "yesterday", "today", "tomorrow", "week", "month", "year",
+            "above", "below", "without", "never", "no", "more", "less", "whose", "having", "company", "department", "manager", "bonus", "budget", "leave", "projects"
         ]
         if any(vp in q_lower for vp in vague_phrases) or (len(q_lower.split()) <= 2 and not any(dk in q_lower for dk in domain_keywords)):
             logger.info("Heuristic planner detected ambiguous/vague query. Setting confidence < 0.70.")
@@ -241,6 +241,11 @@ class AIQueryPlanner:
                 ranking_type=r_type
             )
 
+        subquery_plan = SubquerySemanticUtils.analyze(query, detected_tables)
+        if subquery_plan and subquery_plan.target_table and subquery_plan.target_table not in detected_tables:
+            if subquery_plan.target_table in Base.metadata.tables and subquery_plan.target_table not in SYSTEM_TABLES:
+                detected_tables.append(subquery_plan.target_table)
+
         return ExecutionPlan(
             intent=intent,
             tables=detected_tables,
@@ -257,6 +262,7 @@ class AIQueryPlanner:
             order=order_by[0].direction if order_by else None,
             requires_window_function=(intent == IntentEnum.RANKING),
             window_plan=win_plan,
+            subquery_plan=subquery_plan,
             confidence=0.95
         )
 

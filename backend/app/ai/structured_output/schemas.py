@@ -74,6 +74,23 @@ class TimePlanConfig(BaseModel):
     granularity: Optional[str] = Field(default=None, description="Time granularity: 'day', 'week', 'month', 'quarter', 'year'")
 
 
+class SubqueryPlanConfig(BaseModel):
+    """Configuration for subquery planning metadata in StructuredQuery."""
+    subquery_type: str = Field(description="Type of subquery: 'scalar', 'in', 'not_in', 'exists', 'not_exists', 'correlated', 'table'")
+    target_table: Optional[str] = Field(default=None, description="The table queried inside the subquery")
+    target_column: Optional[str] = Field(default=None, description="The column selected or aggregated in the subquery")
+    comparison_operator: Optional[str] = Field(default=None, description="Comparison operator linking outer query to subquery")
+    aggregate_function: Optional[str] = Field(default=None, description="Aggregate function applied in the subquery")
+    correlation_columns: Optional[List[str]] = Field(default=None, description="Columns linking inner subquery to outer query for correlated subqueries")
+    join_columns: Optional[List[str]] = Field(default=None, description="Join columns if subquery involves joining or linking tables")
+    alias: Optional[str] = Field(default=None, description="Optional alias for the subquery or correlated reference")
+    group_by: Optional[List[str]] = Field(default=None, description="Optional group by columns within the subquery")
+    having: Optional[List[HavingCondition]] = Field(default=None, description="Optional having conditions within the subquery")
+    filters: Optional[List[FilterCondition]] = Field(default=None, description="Optional filters applied inside the subquery")
+    order_by: Optional[List[SortCondition]] = Field(default=None, description="Optional ordering rules inside the subquery")
+    limit: Optional[int] = Field(default=None, description="Optional row limit inside the subquery")
+
+
 class StructuredQuery(BaseModel):
     table: str = Field(description="The primary table to query from")
     joins: Optional[List[JoinCondition]] = Field(default=None, description="List of JOIN conditions")
@@ -101,5 +118,6 @@ class StructuredQuery(BaseModel):
         "Set this when the planner specifies time-based grouping."
     ))
     time_plan: Optional[TimePlanConfig] = Field(default=None, description="Temporal planning configuration if query involves natural language time expressions")
+    subquery_plan: Optional[SubqueryPlanConfig] = Field(default=None, description="Subquery planning configuration if query requires a subquery")
     limit: Optional[int] = Field(default=50, description="Maximum number of rows to return")
     offset: Optional[int] = Field(default=0, description="Number of rows to skip")

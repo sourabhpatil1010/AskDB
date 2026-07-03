@@ -5,7 +5,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_not_exception_type
 
 from app.core.llm import get_llm
-from app.ai.structured_output.schemas import StructuredQuery, TimePlanConfig
+from app.ai.structured_output.schemas import StructuredQuery, TimePlanConfig, SubqueryPlanConfig
 from app.query_builder.query_validator import QueryValidator
 from app.services.ai.prompt_service import PromptService
 from app.models import Base
@@ -316,7 +316,7 @@ class JSONGenerationChain:
         """Fallback deterministic conversion of ExecutionPlan to StructuredQuery when LLM is unavailable."""
         from app.ai.structured_output.schemas import (
             StructuredQuery, JoinCondition, FilterCondition, SortCondition,
-            RankingConfig, OperatorEnum, HavingCondition, WindowFunctionConfig
+            RankingConfig, OperatorEnum, HavingCondition, WindowFunctionConfig, SubqueryPlanConfig
         )
         from app.ai.planner.planner_utils import JoinDetectionUtils, SchemaDateColumnResolver, SchemaJoinResolver
         from app.models import Base as _Base
@@ -520,6 +520,28 @@ class JSONGenerationChain:
                 granularity=plan.time_plan.granularity
             )
 
+        subquery_plan_cfg = None
+        if getattr(plan, "subquery_plan", None):
+            sp = plan.subquery_plan
+            subq_having = [HavingCondition(column=h.metric if "(" in h.metric else f"COUNT(*)", operator=h.operator, value=h.value) for h in sp.having] if sp.having else None
+            subq_filters = [FilterCondition(table=sp.target_table, field=f.field, operator=f.operator, value=f.value) for f in sp.filters] if sp.filters else None
+            subq_order = [SortCondition(table=sp.target_table, field=o.field, direction=o.direction) for o in sp.order_by] if sp.order_by else None
+            subquery_plan_cfg = SubqueryPlanConfig(
+                subquery_type=sp.subquery_type,
+                target_table=sp.target_table,
+                target_column=sp.target_column,
+                comparison_operator=sp.comparison_operator,
+                aggregate_function=sp.aggregate_function,
+                correlation_columns=sp.correlation_columns,
+                join_columns=sp.join_columns,
+                alias=sp.alias,
+                group_by=sp.group_by,
+                having=subq_having,
+                filters=subq_filters,
+                order_by=subq_order,
+                limit=sp.limit
+            )
+
         sq = StructuredQuery(
             table=primary_table,
             joins=joins if joins else None,
@@ -532,6 +554,7 @@ class JSONGenerationChain:
             window_function=window_cfg,
             time_granularity=time_gran,
             time_plan=time_plan_cfg,
+            subquery_plan=subquery_plan_cfg,
             limit=plan.limit or 50
         )
         return sq

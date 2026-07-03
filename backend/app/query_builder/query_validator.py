@@ -331,4 +331,29 @@ class QueryValidator:
                 except Exception:
                     pass
 
+        # Validate subquery_plan
+        if getattr(query, "subquery_plan", None):
+            sp = query.subquery_plan
+            valid_subq_types = {"scalar", "in", "not_in", "exists", "not_exists", "correlated", "table"}
+            if sp.subquery_type.lower() not in valid_subq_types:
+                raise ValueError(f"Invalid subquery_type: '{sp.subquery_type}'")
+            if sp.target_table:
+                if sp.target_table not in self.schema:
+                    raise ValueError(f"Target table '{sp.target_table}' in SubqueryPlan does not exist in schema.")
+                if sp.target_table not in valid_tables:
+                    valid_tables.append(sp.target_table)
+            if sp.target_column:
+                _validate_col(sp.target_column, sp.target_table if sp.target_table in valid_tables else None)
+            if sp.comparison_operator:
+                valid_ops = {"=", "!=", ">", "<", ">=", "<=", "in", "not in", "exists", "not exists", "like", "between"}
+                if sp.comparison_operator.lower() not in valid_ops:
+                    raise ValueError(f"Invalid comparison operator in SubqueryPlan: '{sp.comparison_operator}'")
+            if sp.aggregate_function:
+                valid_aggs = {"avg", "sum", "count", "min", "max"}
+                if sp.aggregate_function.lower() not in valid_aggs:
+                    raise ValueError(f"Invalid aggregate function in SubqueryPlan: '{sp.aggregate_function}'")
+            if sp.correlation_columns:
+                for col in sp.correlation_columns:
+                    _validate_col(col)
+
         return True

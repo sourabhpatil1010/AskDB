@@ -3,7 +3,7 @@ from typing import List, Set, Dict
 
 from app.models import Base
 from app.ai.planner.planner_schema import ExecutionPlan, PlannerClarificationException
-from app.ai.planner.planner_utils import JoinDetectionUtils, QueryDecompositionUtils, BusinessRuleUtils, TimeReasoningUtils, TimeSemanticUtils, SYSTEM_TABLES, SchemaColumnResolver
+from app.ai.planner.planner_utils import JoinDetectionUtils, QueryDecompositionUtils, BusinessRuleUtils, TimeReasoningUtils, TimeSemanticUtils, SubquerySemanticUtils, SYSTEM_TABLES, SchemaColumnResolver
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,13 @@ class PlannerValidator:
 
         if not plan.time_plan:
             plan.time_plan = TimeSemanticUtils.analyze(original_query, plan.tables)
+
+        if not getattr(plan, "subquery_plan", None):
+            subq_plan = SubquerySemanticUtils.analyze(original_query, plan.tables)
+            if subq_plan:
+                plan.subquery_plan = subq_plan
+                if subq_plan.target_table and subq_plan.target_table not in plan.tables and subq_plan.target_table in self.valid_tables:
+                    plan.tables.append(subq_plan.target_table)
 
         # 5. Enrich Business Rules
         rules = BusinessRuleUtils.interpret_rules(original_query)
