@@ -535,6 +535,8 @@ class JSONGenerationChain:
                 correlation_columns=sp.correlation_columns,
                 join_columns=sp.join_columns,
                 alias=sp.alias,
+                outer_table=getattr(sp, "outer_table", None),
+                outer_column=getattr(sp, "outer_column", None),
                 group_by=sp.group_by,
                 having=subq_having,
                 filters=subq_filters,

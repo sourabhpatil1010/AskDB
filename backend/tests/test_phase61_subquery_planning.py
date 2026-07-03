@@ -11,7 +11,9 @@ from app.query_builder.query_validator import QueryValidator
 @pytest.mark.parametrize("query,expected_subq_type,expected_target_table,expected_op", [
     ("Employees earning above company average", "scalar", "employees", ">"),
     ("Employees earning above department average", "correlated", "employees", ">"),
-    ("Departments without employees", "not_in", "employees", "NOT IN"),
+    ("Departments without employees", "not_exists", "employees", "NOT EXISTS"),
+    ("Departments with employees", "exists", "employees", "EXISTS"),
+    ("Projects with managers", "exists", "project_assignments", "EXISTS"),
     ("Employees who never took leave", "not_in", "leave_requests", "NOT IN"),
     ("Employees working on projects with above average budget", "scalar", "projects", ">"),
     ("Projects having no manager", "not_in", "project_assignments", "NOT IN"),

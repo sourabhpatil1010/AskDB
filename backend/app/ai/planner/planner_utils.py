@@ -1790,8 +1790,10 @@ class SubquerySemanticUtils:
         def _resolve_metric_col(tbl_name: str, query_str: str) -> str:
             col_map = {
                 "bonus": "bonus_amount", "salary": "base_salary", "pay": "base_salary",
-                "budget": "budget", "cost": "cost", "hours": "hours_worked",
-                "score": "score", "rating": "rating", "allocation": "allocation_percentage"
+                "earning": "base_salary", "earns": "base_salary",
+                "budget": "budget", "cost": "cost", "hours": "hours_worked", "attendance": "hours_worked",
+                "score": "score", "rating": "rating", "performance": "score",
+                "allocation": "allocation_percentage", "hire": "hire_date", "hired": "hire_date"
             }
             tbl_obj = Base.metadata.tables.get(tbl_name)
             col_names = [c.name for c in tbl_obj.columns] if tbl_obj is not None else []
@@ -1799,13 +1801,13 @@ class SubquerySemanticUtils:
                 if kw in query_str and col in col_names:
                     return col
             for col in col_names:
-                if any(w in col for w in ["salary", "bonus", "budget", "amount", "cost", "score", "hours"]):
+                if any(w in col and w in query_str for w in ["salary", "bonus", "budget", "amount", "cost", "score", "hours", "hire"]):
                     return col
             return "base_salary" if "base_salary" in col_names else ("id" if "id" in col_names else col_names[0] if col_names else "id")
 
         # 1. Check for NOT IN / NOT EXISTS / Negated relationship queries
         # Keywords: without, never, no, with no, having no, not in
-        neg_match = re.search(r'^(.*?)\b(without|never|with\s+no|having\s+no|has\s+no|have\s+no|lacking|not\s+in)\b\s+(.*)', q_lower)
+        neg_match = re.search(r'^(.*?)\b(without|never|with\s+no|having\s+no|has\s+no|have\s+no|lacking|not\s+in|not\s+assigned\s+to|not\s+assigned)\b\s+(.*)', q_lower)
         if neg_match:
             before_str = neg_match.group(1).strip()
             after_str = neg_match.group(3).strip()
@@ -1836,17 +1838,20 @@ class SubquerySemanticUtils:
                 elif "payroll" in after_str or "salary" in after_str or "pay" in after_str: inner_tbl = "payroll"
                 elif "manager" in after_str:
                     inner_tbl = "project_assignments" if outer_tbl == "projects" else "employees"
+            if outer_tbl == "employees" and inner_tbl == "projects":
+                inner_tbl = "project_assignments"
 
             if inner_tbl and inner_tbl != outer_tbl:
                 link_col = _resolve_link_col(outer_tbl, inner_tbl)
                 filters = []
                 if "manager" in after_str and inner_tbl == "project_assignments":
                     filters.append(Filter(field="role", operator="=", value="manager"))
+                is_container_outer = outer_tbl in ("departments", "offices", "clients") and inner_tbl in ("employees", "projects")
                 return SubqueryPlan(
-                    subquery_type="not_in",
+                    subquery_type="not_exists" if is_container_outer else "not_in",
                     target_table=inner_tbl,
                     target_column=link_col,
-                    comparison_operator="NOT IN",
+                    comparison_operator="NOT EXISTS" if is_container_outer else "NOT IN",
                     filters=filters if filters else None
                 )
             elif inner_tbl == outer_tbl and "manager" in after_str:
@@ -1858,14 +1863,78 @@ class SubquerySemanticUtils:
                     filters=[Filter(field="role", operator="=", value="manager")] if outer_tbl == "projects" else None
                 )
 
-        # 2. Check for scalar / correlated comparison to average / aggregate
-        if "average" in q_lower or "avg" in q_lower or "max" in q_lower or "min" in q_lower:
-            if any(comp_kw in q_lower for comp_kw in ["above", "below", "greater", "higher", "more", "less", "under", "over", "exceed"]):
-                op = ">" if any(k in q_lower for k in ["above", "greater", "higher", "more", "over", "exceed"]) else "<"
-                agg = "AVG" if ("average" in q_lower or "avg" in q_lower) else ("MAX" if "max" in q_lower else ("MIN" if "min" in q_lower else "SUM"))
+        # 1.5. Check for EXISTS / Positive relationship queries
+        # Keywords: with employees, with projects, with managers, having employees, having projects, having managers
+        pos_match = re.search(r'^(.*?)\b(with|having|has|have)\b\s+(.*)', q_lower)
+        if pos_match and not any(kw in q_lower for kw in ["average", "avg", "max", "min", "sum", "count", "more than", "less than", "at least", "at most", "greater than", "fewer than", ">", "<", "highest", "lowest", "top", "bottom"]):
+            before_str = pos_match.group(1).strip()
+            after_str = pos_match.group(3).strip()
+            outer_tbl = primary_table
+            for tbl in available_tables:
+                if tbl in before_str or tbl.rstrip('s') in before_str:
+                    outer_tbl = tbl
+                    break
+            if not outer_tbl or outer_tbl == "employees":
+                if "project" in before_str: outer_tbl = "projects"
+                elif "dept" in before_str or "department" in before_str: outer_tbl = "departments"
+                elif "office" in before_str: outer_tbl = "offices"
+                elif "client" in before_str: outer_tbl = "clients"
+
+            inner_tbl = None
+            for tbl in available_tables:
+                if tbl in after_str or tbl.rstrip('s') in after_str:
+                    inner_tbl = tbl
+                    break
+            if not inner_tbl:
+                if "employ" in after_str or "staff" in after_str or "worker" in after_str: inner_tbl = "employees"
+                elif "project" in after_str: inner_tbl = "projects"
+                elif "manager" in after_str:
+                    inner_tbl = "project_assignments" if outer_tbl == "projects" else "employees"
+
+            if inner_tbl and inner_tbl != outer_tbl:
+                link_col = _resolve_link_col(outer_tbl, inner_tbl)
+                filters = []
+                if "manager" in after_str and inner_tbl == "project_assignments":
+                    filters.append(Filter(field="role", operator="=", value="manager"))
+                is_container_outer = outer_tbl in ("departments", "offices", "clients", "projects")
+                subq_type = "exists" if is_container_outer else "in"
+                comp_op = "EXISTS" if is_container_outer else "IN"
+                return SubqueryPlan(
+                    subquery_type=subq_type,
+                    target_table=inner_tbl,
+                    target_column=link_col,
+                    comparison_operator=comp_op,
+                    filters=filters if filters else None
+                )
+
+        # 2a. Check for company average group counts (e.g., Departments having more employees than company average)
+        if "company average" in q_lower and any(kw in q_lower for kw in ["employee", "staff", "worker", "project", "client", "user"]):
+            target_tbl = "employees" if any(w in q_lower for w in ["employee", "staff", "worker"]) else ("projects" if "project" in q_lower else "clients")
+            op = ">" if any(k in q_lower for k in ["more", "greater", "above", "higher", "exceed", ">"]) else "<"
+            group_col = "department_id" if Base.metadata.tables.get(target_tbl) is not None and "department_id" in [c.name for c in Base.metadata.tables.get(target_tbl).columns] else "id"
+            return SubqueryPlan(
+                subquery_type="scalar",
+                target_table=target_tbl,
+                target_column="id",
+                comparison_operator=op,
+                aggregate_function="AVG",
+                group_by=[group_col]
+            )
+
+        # 2. Check for scalar / correlated comparison to average / aggregate / superlative
+        if ("average" in q_lower and "highest average" not in q_lower and "lowest average" not in q_lower) or "avg" in q_lower or "max" in q_lower or "min" in q_lower or (any(k in q_lower for k in ["highest", "lowest", "top", "bottom", "largest", "smallest", "best", "worst"]) and any(ckw in q_lower for ckw in ["in each", "for each", "per department", "in their"])):
+            is_superlative = any(k in q_lower for k in ["highest", "lowest", "top", "bottom", "largest", "smallest", "best", "worst", "max", "min"]) and any(ckw in q_lower for ckw in ["in each", "for each", "per department", "in their"])
+            is_comp = any(comp_kw in q_lower for comp_kw in ["above", "below", "greater", "higher", "more", "less", "under", "over", "exceed"])
+            if is_superlative or is_comp or "average" in q_lower or "avg" in q_lower:
+                if is_superlative and not is_comp:
+                    op = "="
+                    agg = "MAX" if any(k in q_lower for k in ["highest", "top", "largest", "best", "max"]) else "MIN"
+                else:
+                    op = ">" if any(k in q_lower for k in ["above", "greater", "higher", "more", "over", "exceed"]) else "<"
+                    agg = "AVG" if ("average" in q_lower or "avg" in q_lower) else ("MAX" if "max" in q_lower else ("MIN" if "min" in q_lower else "SUM"))
                 
                 # Check if correlated
-                is_correlated = any(ckw in q_lower for ckw in ["department average", "office average", "team average", "role average", "per department", "their department", "own department"])
+                is_correlated = any(ckw in q_lower for ckw in ["department average", "office average", "team average", "role average", "per department", "their department", "own department", "in each", "for each", "by department", "department bonus", "above-average performance"]) or ("department" in q_lower and ("average" in q_lower or "avg" in q_lower or is_superlative))
                 
                 # Identify target table for subquery
                 target_tbl = primary_table
@@ -1881,15 +1950,21 @@ class SubquerySemanticUtils:
                             if tbl in available_tables and "budget" in [c.name for c in Base.metadata.tables.get(tbl).columns]:
                                 target_tbl = tbl
                                 break
+                elif "performance" in q_lower or "score" in q_lower or "rating" in q_lower:
+                    target_tbl = "performance_reviews"
+                elif "attendance" in q_lower or "hours" in q_lower:
+                    target_tbl = "attendance"
 
                 target_col = _resolve_metric_col(target_tbl, q_lower)
+                outer_col = _resolve_metric_col(primary_table, q_lower) if (Base.metadata.tables.get(primary_table) is not None and target_col in [c.name for c in Base.metadata.tables.get(primary_table).columns]) else target_col
 
                 if is_correlated:
                     corr_cols = []
                     if "office" in q_lower:
-                        corr_cols = ["office_id"] if "office_id" in [c.name for c in Base.metadata.tables.get(primary_table).columns] else ["department_id"]
+                        corr_cols = ["office_id"] if Base.metadata.tables.get(primary_table) is not None and "office_id" in [c.name for c in Base.metadata.tables.get(primary_table).columns] else ["department_id"]
                     else:
-                        corr_cols = ["department_id"] if "department_id" in [c.name for c in Base.metadata.tables.get(primary_table).columns] else ["id"]
+                        corr_cols = ["department_id"] if Base.metadata.tables.get(primary_table) is not None and "department_id" in [c.name for c in Base.metadata.tables.get(primary_table).columns] else ["id"]
+                    alias_str = "p2" if target_tbl == "payroll" else (f"{target_tbl[:1]}2" if target_tbl else "e2")
                     return SubqueryPlan(
                         subquery_type="correlated",
                         target_table=target_tbl,
@@ -1897,7 +1972,9 @@ class SubquerySemanticUtils:
                         comparison_operator=op,
                         aggregate_function=agg,
                         correlation_columns=corr_cols,
-                        alias="e2"
+                        alias=alias_str,
+                        outer_table=primary_table,
+                        outer_column=outer_col
                     )
                 else:
                     return SubqueryPlan(
@@ -1942,20 +2019,44 @@ class SubquerySemanticUtils:
                 limit=1
             )
 
-        # 5. Check for cross-entity or relationship comparison (e.g., whose manager earns more than 100000)
-        if "whose " in q_lower or "manager earns" in q_lower or "manager with" in q_lower:
+        # 5. Check for cross-entity or relationship comparison (e.g., whose manager earns more than 100000, whose manager earns more than them, hired before their manager)
+        if any(k in q_lower for k in ["whose manager", "manager earns", "manager with", "before their manager", "after their manager", "than their manager", "manager earns more", "hired before"]):
             num_match = re.search(r'(\d+)', q_lower)
-            val = int(num_match.group(1)) if num_match else 100000
-            op = ">" if any(k in q_lower for k in ["more", "greater", "above", "exceed", ">"]) else "<"
-            metric_col = _resolve_metric_col("employees", q_lower)
-            return SubqueryPlan(
-                subquery_type="in",
-                target_table="employees",
-                target_column="id",
-                comparison_operator="IN",
-                filters=[Filter(field=metric_col, operator=op, value=val)],
-                correlation_columns=["department_id"] if "department_id" in [c.name for c in Base.metadata.tables.get(primary_table).columns] else None
-            )
+            if num_match:
+                val = int(num_match.group(1))
+                op = ">" if any(k in q_lower for k in ["more", "greater", "above", "exceed", ">"]) else "<"
+                metric_col = _resolve_metric_col("employees", q_lower)
+                return SubqueryPlan(
+                    subquery_type="in",
+                    target_table="employees",
+                    target_column="id",
+                    comparison_operator="IN",
+                    filters=[Filter(field=metric_col, operator=op, value=val)],
+                    correlation_columns=["department_id"] if "department_id" in [c.name for c in Base.metadata.tables.get(primary_table).columns] else None
+                )
+            else:
+                op = "<" if any(k in q_lower for k in ["more than them", "more than employee", "earns more", "higher than them", "before", "earlier", "<"]) else ">"
+                target_tbl = primary_table
+                for kw, candidate_col in [("salary", "base_salary"), ("earning", "base_salary"), ("earns", "base_salary"), ("pay", "base_salary"), ("bonus", "bonus_amount"), ("hire", "hire_date"), ("hired", "hire_date")]:
+                    if kw in q_lower:
+                        for tbl in available_tables:
+                            if Base.metadata.tables.get(tbl) is not None and candidate_col in [c.name for c in Base.metadata.tables.get(tbl).columns]:
+                                target_tbl = tbl
+                                break
+                        break
+                metric_col = _resolve_metric_col(target_tbl, q_lower)
+                outer_col = _resolve_metric_col(primary_table, q_lower) if (Base.metadata.tables.get(primary_table) is not None and metric_col in [c.name for c in Base.metadata.tables.get(primary_table).columns]) else metric_col
+                col_names = [c.name for c in Base.metadata.tables.get(primary_table).columns] if Base.metadata.tables.get(primary_table) is not None else []
+                corr_cols = ["manager_id"] if "manager_id" in col_names else (["department_id"] if "department_id" in col_names else ["id"])
+                return SubqueryPlan(
+                    subquery_type="correlated",
+                    target_table=target_tbl,
+                    target_column=metric_col,
+                    comparison_operator=op,
+                    alias="manager",
+                    correlation_columns=corr_cols,
+                    outer_table=primary_table,
+                    outer_column=outer_col
+                )
 
         return None
-

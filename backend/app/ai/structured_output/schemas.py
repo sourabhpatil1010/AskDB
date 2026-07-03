@@ -84,6 +84,8 @@ class SubqueryPlanConfig(BaseModel):
     correlation_columns: Optional[List[str]] = Field(default=None, description="Columns linking inner subquery to outer query for correlated subqueries")
     join_columns: Optional[List[str]] = Field(default=None, description="Join columns if subquery involves joining or linking tables")
     alias: Optional[str] = Field(default=None, description="Optional alias for the subquery or correlated reference")
+    outer_table: Optional[str] = Field(default=None, description="Optional outer table name referenced by correlation")
+    outer_column: Optional[str] = Field(default=None, description="Optional column on the outer table being compared or correlated")
     group_by: Optional[List[str]] = Field(default=None, description="Optional group by columns within the subquery")
     having: Optional[List[HavingCondition]] = Field(default=None, description="Optional having conditions within the subquery")
     filters: Optional[List[FilterCondition]] = Field(default=None, description="Optional filters applied inside the subquery")
