@@ -5,7 +5,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_not_exception_type
 
 from app.core.llm import get_llm
-from app.ai.structured_output.schemas import StructuredQuery
+from app.ai.structured_output.schemas import StructuredQuery, TimePlanConfig
 from app.query_builder.query_validator import QueryValidator
 from app.services.ai.prompt_service import PromptService
 from app.models import Base
@@ -507,6 +507,19 @@ class JSONGenerationChain:
                         matched_expr = metric_name if "(" in metric_name else f"COUNT(*)"
                 having_list.append(HavingCondition(column=matched_expr, operator=h.operator, value=h.value))
 
+        time_plan_cfg = None
+        if plan.time_plan:
+            time_plan_cfg = TimePlanConfig(
+                time_expression=plan.time_plan.time_expression,
+                date_field=plan.time_plan.date_field,
+                operator=plan.time_plan.operator,
+                start_date=plan.time_plan.start_date,
+                end_date=plan.time_plan.end_date,
+                relative_period=plan.time_plan.relative_period,
+                relative_offset=plan.time_plan.relative_offset,
+                granularity=plan.time_plan.granularity
+            )
+
         sq = StructuredQuery(
             table=primary_table,
             joins=joins if joins else None,
@@ -518,6 +531,7 @@ class JSONGenerationChain:
             ranking=ranking_cfg,
             window_function=window_cfg,
             time_granularity=time_gran,
+            time_plan=time_plan_cfg,
             limit=plan.limit or 50
         )
         return sq
