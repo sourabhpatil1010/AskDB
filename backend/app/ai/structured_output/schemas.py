@@ -53,11 +53,12 @@ class RankingConfig(BaseModel):
 
 
 class WindowFunctionConfig(BaseModel):
-    """Configuration for SQL window functions (e.g., ROW_NUMBER, RANK, DENSE_RANK, SUM, AVG)."""
-    function: str = Field(description="The window function name: ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, SUM, AVG, MIN, MAX, COUNT, FIRST_VALUE, LAST_VALUE")
+    """Configuration for SQL window functions (e.g., ROW_NUMBER, RANK, DENSE_RANK, SUM, AVG, DIFFERENCE)."""
+    function: str = Field(description="The window function name: ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, SUM, AVG, MIN, MAX, COUNT, FIRST_VALUE, LAST_VALUE, DIFFERENCE")
     column: Optional[str] = Field(default=None, description="The target column or expression for analytical window functions, e.g. 'payroll.base_salary' or 'id'")
     partition_by: Optional[List[str]] = Field(default=None, description="List of columns or expressions to PARTITION BY, e.g. ['department']")
     order_by: Optional[List[SortCondition]] = Field(default=None, description="List of SortCondition rules for ordering within the partition")
+    frame: Optional[str] = Field(default=None, description="Window frame specification, e.g. 'ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW'")
     alias: Optional[str] = Field(default="rank_num", description="Alias for the result column of the window function")
 
 

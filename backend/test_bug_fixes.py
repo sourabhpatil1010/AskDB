@@ -114,15 +114,15 @@ async def test_bug_4_verify_all_aggregation_queries():
         print(f"  -> Plan intent: {plan.intent.value}, tables: {plan.tables}, confidence: {plan.confidence}")
         
     # Verify the unsupported query is caught cleanly
-    unsupported_q = "Calculate running total of salaries"
-    print(f"\nTesting planner for unsupported Phase 1 query: '{unsupported_q}'")
+    unsupported_q = "Show org chart hierarchy of employees"
+    print(f"\nTesting planner for unsupported query: '{unsupported_q}'")
     try:
         await planner.plan(unsupported_q)
-        raise AssertionError("Should have raised PlannerValidationException for running total query!")
+        raise AssertionError("Should have raised PlannerValidationException for unsupported query!")
     except (PlannerValidationException, PlannerClarificationException) as e:
         print(f"  -> Successfully caught unsupported capability: {e}")
             
-    print("\n✅ BUG 4 TEST PASSED: All 11 supported queries planned cleanly, and 1 unsupported query caught gracefully.")
+    print("\n✅ BUG 4 TEST PASSED: All supported queries planned cleanly, and unsupported query caught gracefully.")
 
 async def main():
     test_bug_1_order_by_raw_date_column_when_grouped()

@@ -8,7 +8,7 @@ from app.ai.planner.planner_schema import (
 )
 from app.ai.planner.planner_chain import PlannerChain
 from app.ai.planner.planner_validator import PlannerValidator
-from app.ai.planner.planner_utils import TimeReasoningUtils, JoinDetectionUtils, BusinessRuleUtils, QueryDecompositionUtils, RankingSemanticUtils, SYSTEM_TABLES
+from app.ai.planner.planner_utils import TimeReasoningUtils, JoinDetectionUtils, BusinessRuleUtils, QueryDecompositionUtils, RankingSemanticUtils, AnalyticalWindowSemanticUtils, SYSTEM_TABLES
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,33 @@ class AIQueryPlanner:
         if "payroll" in detected_tables and "employees" not in detected_tables:
             detected_tables.insert(0, "employees")
 
-        # 3. Advanced ranking queries detection via generic semantic analyzer
+        # 3. Advanced analytical window function detection via generic semantic analyzer
+        analytical_info = AnalyticalWindowSemanticUtils.analyze(query, detected_tables)
+        if analytical_info:
+            target_metric = analytical_info["target_metric"]
+            win_plan = WindowPlan(
+                requires_window=True,
+                function=analytical_info["function"],
+                column=target_metric,
+                target_metric=target_metric,
+                partition_by=analytical_info["partition_by"],
+                order_by=analytical_info["order_by"],
+                frame=analytical_info["frame"],
+                alias=analytical_info["alias"]
+            )
+            return ExecutionPlan(
+                intent=IntentEnum.ANALYTICAL_WINDOW,
+                tables=analytical_info["tables"],
+                metrics=[Metric(field=target_metric, operation="", alias=target_metric)] if target_metric else None,
+                order_by=analytical_info["order_by"],
+                partition_by=analytical_info["partition_by"],
+                requires_window_function=True,
+                window_plan=win_plan,
+                analytical_window_plan=win_plan,
+                confidence=0.95
+            )
+
+        # 4. Advanced ranking queries detection via generic semantic analyzer
         ranking_info = RankingSemanticUtils.analyze(query, detected_tables)
         if ranking_info:
             sal_field = ranking_info["metric_field"]

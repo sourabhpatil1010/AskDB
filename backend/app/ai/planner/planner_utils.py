@@ -6,7 +6,7 @@ import logging
 
 from sqlalchemy import Date, DateTime
 from app.models import Base
-from app.ai.planner.planner_schema import Filter, ExecutionPlan
+from app.ai.planner.planner_schema import Filter, ExecutionPlan, OrderCondition
 
 logger = logging.getLogger(__name__)
 
@@ -965,6 +965,175 @@ class QueryDecompositionUtils:
             tasks.append("Task 1: Retrieve requested columns from primary entity")
 
         return tasks
+
+
+class AnalyticalWindowSemanticUtils:
+    """Generic semantic analyzer for advanced analytical window function queries (Running Totals, Moving Averages, Lag, Lead, Difference, First/Last Value).
+    Avoids hardcoding specific queries by extracting intent, target metrics, grouping/partition scopes, ordering, and frame specifications dynamically from schema metadata.
+    """
+    _NUMBER_WORD_MAP = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+        "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10
+    }
+
+    @classmethod
+    def analyze(cls, query: str, detected_tables: List[str]) -> Optional[Dict[str, Any]]:
+        import re
+        q_lower = query.lower().strip()
+
+        analytical_indicators = [
+            "running total", "running sum", "running count", "running average", "running avg", "running min", "running max",
+            "running payroll", "running salary", "running attendance", "running employee", "running number",
+            "cumulative", "moving average", "rolling average", "moving avg", "rolling avg",
+            "difference from previous", "diff from previous", "salary difference from previous",
+            "previous employee salary", "next employee salary", "previous employee", "next employee",
+            "first employee hired", "last employee hired", "first salary", "last attendance", "first value", "last value"
+        ]
+        if not any(ind in q_lower for ind in analytical_indicators):
+            if not (re.search(r'\b(?:rolling|moving)\s+(\w+)\s+(?:month|day|week|year|item|record)?\s*(?:average|avg)\b', q_lower) or
+                    re.search(r'\b(?:first|last)\s+(?:employee|user|person|worker)\s+hired\b', q_lower) or
+                    re.search(r'\b(?:previous|next)\s+(?:employee|user|person|worker|salary|value)\b', q_lower)):
+                return None
+
+        func_name = None
+        frame_str = None
+        alias_str = "win_val"
+
+        if any(w in q_lower for w in ["difference", "diff", "change from previous", "difference from previous"]):
+            func_name = "DIFFERENCE"
+            alias_str = "diff_val" if "diff" in q_lower else "salary_diff"
+        elif any(w in q_lower for w in ["previous", "prior", "lag"]):
+            func_name = "LAG"
+            alias_str = "prev_val" if not any(w in q_lower for w in ["salary", "payroll"]) else "prev_salary"
+        elif any(w in q_lower for w in ["next", "lead", "following"]):
+            func_name = "LEAD"
+            alias_str = "next_val" if not any(w in q_lower for w in ["salary", "payroll"]) else "next_salary"
+        elif any(w in q_lower for w in ["moving average", "rolling average", "moving avg", "rolling avg"]) or re.search(r'\b(?:rolling|moving)\b', q_lower):
+            func_name = "AVG"
+            alias_str = "moving_avg" if "moving" in q_lower else "rolling_avg"
+            n_val = 3
+            m_roll = re.search(r'\b(?:rolling|moving)\s+([a-zA-Z0-9]+)\s+(?:month|day|week|year|item|record)?\s*(?:average|avg)\b', q_lower)
+            if m_roll:
+                val_s = m_roll.group(1).lower()
+                if val_s in cls._NUMBER_WORD_MAP:
+                    n_val = cls._NUMBER_WORD_MAP[val_s]
+                elif val_s.isdigit():
+                    n_val = int(val_s)
+            if n_val > 1:
+                frame_str = f"ROWS BETWEEN {n_val - 1} PRECEDING AND CURRENT ROW"
+            else:
+                frame_str = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
+        elif any(w in q_lower for w in ["running average", "running avg", "cumulative average", "cumulative avg"]):
+            func_name = "AVG"
+            alias_str = "running_avg"
+            frame_str = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
+        elif any(w in q_lower for w in ["running count", "cumulative count", "cumulative hiring", "running number", "running employee count"]):
+            func_name = "COUNT"
+            alias_str = "running_count" if "running" in q_lower else "cumulative_count"
+            frame_str = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
+        elif any(w in q_lower for w in ["running min", "cumulative min"]):
+            func_name = "MIN"
+            alias_str = "running_min"
+            frame_str = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
+        elif any(w in q_lower for w in ["running max", "cumulative max"]):
+            func_name = "MAX"
+            alias_str = "running_max"
+            frame_str = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
+        elif any(w in q_lower for w in ["running total", "running sum", "cumulative total", "cumulative payroll", "cumulative salary", "cumulative attendance", "running payroll", "running salary", "running attendance", "cumulative"]):
+            if any(w in q_lower for w in ["hiring", "hire", "employee", "employees", "user", "users", "count", "number"]) and not any(w in q_lower for w in ["salary", "payroll", "pay", "attendance", "hours"]):
+                func_name = "COUNT"
+                alias_str = "running_count" if "running" in q_lower else "cumulative_count"
+            else:
+                func_name = "SUM"
+                if "payroll" in q_lower:
+                    alias_str = "running_payroll_total" if "running" in q_lower else "cumulative_payroll"
+                elif "salary" in q_lower:
+                    alias_str = "running_salary_total" if "running" in q_lower else "cumulative_salary"
+                elif "attendance" in q_lower or "hours" in q_lower:
+                    alias_str = "running_attendance_total" if "running" in q_lower else "cumulative_attendance"
+                else:
+                    alias_str = "running_total"
+            frame_str = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
+        elif any(w in q_lower for w in ["first employee hired", "first salary", "first value", "earliest employee hired"]):
+            func_name = "FIRST_VALUE"
+            alias_str = "first_val"
+            frame_str = "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"
+        elif any(w in q_lower for w in ["last employee hired", "last attendance", "last value", "latest employee hired"]):
+            func_name = "LAST_VALUE"
+            alias_str = "last_val"
+            frame_str = "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"
+
+        if not func_name:
+            return None
+
+        partition_by = None
+        group_cols = SemanticQueryParser.extract_grouping(query, detected_tables)
+        if group_cols:
+            partition_by = [group_cols[0]]
+        elif "department" in q_lower and "department" not in [t.rstrip("s") for t in detected_tables if t != "departments"]:
+            partition_by = ["departments.name"] if "departments" in detected_tables else ["department"]
+
+        metric_field = None
+        if func_name == "COUNT":
+            pt = detected_tables[0] if detected_tables else "employees"
+            tbl_obj = Base.metadata.tables.get(pt)
+            if tbl_obj is not None and tbl_obj.primary_key.columns:
+                metric_field = list(tbl_obj.primary_key.columns)[0].name
+            else:
+                metric_field = "id"
+        elif func_name in {"FIRST_VALUE", "LAST_VALUE"} and not any(w in q_lower for w in ["salary", "payroll", "pay", "bonus", "attendance", "hours", "score", "review"]):
+            for t_name in detected_tables:
+                t_obj = Base.metadata.tables.get(t_name)
+                if t_obj is not None:
+                    for col in t_obj.columns:
+                        if col.name in {"first_name", "name", "full_name", "title", "username"}:
+                            metric_field = col.name
+                            break
+                if metric_field:
+                    break
+            if not metric_field:
+                metric_field = "id"
+        else:
+            match_res = SchemaColumnResolver.find_matching_schema_column(query, detected_tables)
+            if match_res:
+                metric_field = match_res[1]
+            elif any(w in q_lower for w in ["attendance", "hours"]):
+                metric_field = "hours_worked"
+            elif any(w in q_lower for w in ["salary", "payroll", "pay", "earning"]):
+                metric_field = "base_salary"
+            else:
+                for t_name in detected_tables:
+                    t_obj = Base.metadata.tables.get(t_name)
+                    if t_obj is not None:
+                        for col in t_obj.columns:
+                            if col.name not in {"id", "department_id", "office_id", "employee_id", "user_id"} and not col.name.endswith("_id"):
+                                metric_field = col.name
+                                break
+                    if metric_field:
+                        break
+                if not metric_field:
+                    metric_field = "id"
+
+        order_field = None
+        for t_name in detected_tables:
+            d_col = SchemaDateColumnResolver.resolve(t_name)
+            if d_col:
+                order_field = d_col
+                break
+        if not order_field:
+            order_field = "id"
+
+        return {
+            "function": func_name,
+            "target_metric": metric_field,
+            "partition_by": partition_by,
+            "order_by": [OrderCondition(field=order_field, direction="asc")],
+            "frame": frame_str,
+            "alias": alias_str,
+            "tables": detected_tables,
+            "requires_window_function": True
+        }
 
 
 class RankingSemanticUtils:

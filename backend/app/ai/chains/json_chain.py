@@ -170,7 +170,9 @@ def _build_translation_hints(plan: ExecutionPlan) -> str:
             )
 
     # --- 7.5. Ranking hint ---
-    is_ranking = (
+    win_p_hint = getattr(plan, "window_plan", None) or getattr(plan, "analytical_window_plan", None)
+    is_analytical_win_hint = (hasattr(plan, "intent") and getattr(plan.intent, "value", str(plan.intent)) == "analytical_window") or (win_p_hint is not None and getattr(win_p_hint, "function", "") not in {"ROW_NUMBER", "RANK", "DENSE_RANK", ""})
+    is_ranking = not is_analytical_win_hint and (
         (hasattr(plan, "intent") and getattr(plan.intent, "value", str(plan.intent)) == "ranking")
         or getattr(plan, "requires_window_function", False)
         or getattr(plan, "ranking_type", None)
@@ -409,9 +411,12 @@ class JSONGenerationChain:
             )
             
         window_cfg = None
-        win_p = getattr(plan, "window_plan", None)
+        win_p = getattr(plan, "window_plan", None) or getattr(plan, "analytical_window_plan", None)
         if win_p or is_ranking:
             w_func = getattr(win_p, "function", None) if win_p else ("DENSE_RANK" if getattr(plan, "nth_rank", None) else ("RANK" if "rank" in str(getattr(plan, "intent", "")).lower() else "ROW_NUMBER"))
+            w_col = getattr(win_p, "column", None) if win_p else None
+            if not w_col and win_p:
+                w_col = getattr(win_p, "target_metric", None)
             w_part_raw = getattr(win_p, "partition_by", None) if win_p else None
             if w_part_raw:
                 from app.ai.planner.planner_utils import SchemaGroupingResolver
@@ -419,6 +424,7 @@ class JSONGenerationChain:
             else:
                 w_part = part_cols if is_ranking and part_cols else None
             w_alias = getattr(win_p, "alias", None) if win_p else "rank_num"
+            w_frame = getattr(win_p, "frame", None) if win_p else None
             w_order = None
             if win_p and getattr(win_p, "order_by", None):
                 w_order = []
@@ -432,10 +438,23 @@ class JSONGenerationChain:
                 
             window_cfg = WindowFunctionConfig(
                 function=w_func or "ROW_NUMBER",
+                column=w_col,
                 partition_by=w_part,
                 order_by=w_order,
+                frame=w_frame,
                 alias=w_alias
             )
+            if getattr(window_cfg, "function", "") not in {"ROW_NUMBER", "RANK", "DENSE_RANK", ""}:
+                group_by = []
+                if window_cfg.partition_by:
+                    for p in window_cfg.partition_by:
+                        if p not in columns and not any(p in c for c in columns):
+                            columns.append(p)
+                if window_cfg.order_by:
+                    for o in window_cfg.order_by:
+                        q_o = f"{o.table}.{o.field}" if o.table else o.field
+                        if q_o not in columns and not any(o.field in c for c in columns):
+                            columns.append(q_o)
 
         filters = []
         if plan.filters:

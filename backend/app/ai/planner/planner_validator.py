@@ -138,8 +138,8 @@ class PlannerValidator:
         """Detects unsupported SQL patterns (e.g. Recursive Queries, Unions, Moving Averages), failing gracefully."""
         q_lower = query.lower()
         unsupported_terms = [
-            "running total", "cumulative sum", "moving average", "recursive", "hierarchy tree",
-            "org chart hierarchy", "chain of command", "union of", "intersect with", "except for"
+            "recursive", "hierarchy tree", "org chart hierarchy",
+            "chain of command", "union of", "intersect with", "except for"
         ]
         for term in unsupported_terms:
             if term in q_lower:

@@ -171,6 +171,8 @@ class SQLGenerator:
                 qual_f = f"{tbl}.{fld}" if tbl and not fld.startswith(f"{tbl}.") else fld
                 order_strs.append(f"{qual_f} {o.direction.upper()}")
             over_parts.append(f"ORDER BY {', '.join(order_strs)}")
+        if getattr(wf, "frame", None) and str(wf.frame).strip() and func_name not in {"ROW_NUMBER", "RANK", "DENSE_RANK", "LAG", "LEAD", "DIFFERENCE", "DIFF"}:
+            over_parts.append(str(wf.frame).strip())
         over_clause = " ".join(over_parts)
         
         ranking_funcs = {"ROW_NUMBER", "RANK", "DENSE_RANK"}
@@ -185,7 +187,10 @@ class SQLGenerator:
                     owner = SchemaColumnResolver.resolve_column_owner(target_col, available_tables) or default_table
                     if owner:
                         target_col = f"{owner}.{target_col}"
-            func_expr = f"{func_name}({target_col})"
+            if func_name in {"DIFFERENCE", "DIFF"}:
+                func_expr = f"{target_col} - LAG({target_col})"
+            else:
+                func_expr = f"{func_name}({target_col})"
             
         expr = f"{func_expr} OVER ({over_clause})"
         if wf.alias:
@@ -246,7 +251,7 @@ class SQLGenerator:
             sql_parts.append(where_str)
 
         # GROUP BY
-        if query.group_by:
+        if query.group_by and not (query.window_function and getattr(query.window_function, "function", "") not in {"ROW_NUMBER", "RANK", "DENSE_RANK", ""}):
             qual_gb = [SchemaColumnResolver.qualify_column(gb, all_tbls, default_table=query.table) for gb in query.group_by]
             sql_parts.append("GROUP BY " + ", ".join(qual_gb))
 

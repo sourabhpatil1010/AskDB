@@ -262,7 +262,7 @@ class QueryValidator:
 
         # Validate window_function
         if query.window_function:
-            supported_funcs = {"ROW_NUMBER", "RANK", "DENSE_RANK", "LAG", "LEAD", "SUM", "AVG", "MIN", "MAX", "COUNT", "FIRST_VALUE", "LAST_VALUE"}
+            supported_funcs = {"ROW_NUMBER", "RANK", "DENSE_RANK", "LAG", "LEAD", "SUM", "AVG", "MIN", "MAX", "COUNT", "FIRST_VALUE", "LAST_VALUE", "DIFFERENCE", "DIFF"}
             raw_func_name = query.window_function.function.split("(")[0].strip().upper()
             if raw_func_name not in supported_funcs:
                 raise ValueError(f"Unsupported window function: '{query.window_function.function}'")
@@ -283,5 +283,8 @@ class QueryValidator:
                     pass
                 else:
                     _validate_col(target_col)
+            if getattr(query.window_function, "frame", None) is not None:
+                if not isinstance(query.window_function.frame, str) or not query.window_function.frame.strip():
+                    raise ValueError("Window frame specification must be a non-empty string")
 
         return True
