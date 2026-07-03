@@ -97,10 +97,17 @@ When the Execution Plan or SQL Translation Hints specify ranking (e.g. Top-N per
   - "order_by": sort object specifying table, field, and direction for ranking (e.g. {{"table": "payroll", "field": "base_salary", "direction": "desc"}})
   - "dense_rank": boolean true if DENSE_RANK() or specific N-th rank should be used
 
+RULE 14 — WINDOW FUNCTION CONFIGURATION:
+When the Execution Plan specifies window_plan or requires a window function (e.g. ROW_NUMBER, RANK, DENSE_RANK), populate the optional "window_function" object:
+  - "function": string name of window function ("ROW_NUMBER", "RANK", "DENSE_RANK", etc.)
+  - "partition_by": list of columns to partition by (e.g. ["departments.name"])
+  - "order_by": list of SortCondition objects (e.g. [{{"table": "payroll", "field": "base_salary", "direction": "desc"}}])
+  - "alias": string alias for result column (e.g. "rank_num")
+
 === USER QUESTION & EXECUTION PLAN ===
 {query}
 
 Generate the JSON query structure based ONLY on the schema and execution plan provided.
-Every aggregation from the plan must appear in columns. Every HAVING condition from the plan must appear in having. Every ranking specification must appear in ranking.
+Every aggregation from the plan must appear in columns. Every HAVING condition from the plan must appear in having. Every ranking specification must appear in ranking. Every window function specification must appear in window_function.
 
 {format_instructions}

@@ -93,6 +93,22 @@ def resolve_synthetic_columns(query: StructuredQuery):
             query.ranking.order_by.field = as_m.group(2) if as_m else res_order
             if as_m and query.ranking.order_by.table:
                 query.ranking.order_by.table = None
+    if query.window_function:
+        if query.window_function.partition_by:
+            new_part = []
+            for p in query.window_function.partition_by:
+                res_p = _resolve_col(p)
+                as_m = re.search(r'^(.+?)\s+AS\s+(\w+)\s*$', res_p, re.IGNORECASE)
+                new_part.append(as_m.group(1).strip() if as_m else res_p)
+            query.window_function.partition_by = new_part
+        if query.window_function.order_by:
+            for o in query.window_function.order_by:
+                if o.field:
+                    res_order = _resolve_col(o.field)
+                    as_m = re.search(r'^(.+?)\s+AS\s+(\w+)\s*$', res_order, re.IGNORECASE)
+                    o.field = as_m.group(2) if as_m else res_order
+                    if as_m and o.table:
+                        o.table = None
 
 
 class QueryValidator:
@@ -243,5 +259,29 @@ class QueryValidator:
                     pass
                 else:
                     _validate_col(query.ranking.order_by.field, query.ranking.order_by.table)
+
+        # Validate window_function
+        if query.window_function:
+            supported_funcs = {"ROW_NUMBER", "RANK", "DENSE_RANK", "LAG", "LEAD", "SUM", "AVG", "MIN", "MAX", "COUNT", "FIRST_VALUE", "LAST_VALUE"}
+            raw_func_name = query.window_function.function.split("(")[0].strip().upper()
+            if raw_func_name not in supported_funcs:
+                raise ValueError(f"Unsupported window function: '{query.window_function.function}'")
+            if not query.window_function.alias or not isinstance(query.window_function.alias, str) or not query.window_function.alias.strip():
+                raise ValueError("Window function alias must be a valid non-empty string")
+            if query.window_function.partition_by:
+                for p in query.window_function.partition_by:
+                    _validate_col(p)
+            if query.window_function.order_by:
+                for o in query.window_function.order_by:
+                    if not _is_computed_expression(o.field) and "." not in o.field:
+                        pass
+                    else:
+                        _validate_col(o.field, o.table)
+            target_col = getattr(query.window_function, "column", None) or getattr(query.window_function, "field", None) or getattr(query.window_function, "target_column", None)
+            if target_col and target_col != "*" and not target_col.endswith(".*"):
+                if not _is_computed_expression(target_col) and "." not in target_col:
+                    pass
+                else:
+                    _validate_col(target_col)
 
         return True

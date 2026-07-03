@@ -52,6 +52,15 @@ class RankingConfig(BaseModel):
     dense_rank: bool = Field(default=False, description="True if DENSE_RANK() or N-th rank should be used")
 
 
+class WindowFunctionConfig(BaseModel):
+    """Configuration for SQL window functions (e.g., ROW_NUMBER, RANK, DENSE_RANK, SUM, AVG)."""
+    function: str = Field(description="The window function name: ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, SUM, AVG, MIN, MAX, COUNT, FIRST_VALUE, LAST_VALUE")
+    column: Optional[str] = Field(default=None, description="The target column or expression for analytical window functions, e.g. 'payroll.base_salary' or 'id'")
+    partition_by: Optional[List[str]] = Field(default=None, description="List of columns or expressions to PARTITION BY, e.g. ['department']")
+    order_by: Optional[List[SortCondition]] = Field(default=None, description="List of SortCondition rules for ordering within the partition")
+    alias: Optional[str] = Field(default="rank_num", description="Alias for the result column of the window function")
+
+
 class StructuredQuery(BaseModel):
     table: str = Field(description="The primary table to query from")
     joins: Optional[List[JoinCondition]] = Field(default=None, description="List of JOIN conditions")
@@ -73,6 +82,7 @@ class StructuredQuery(BaseModel):
         "Example: COUNT(employees.id) > 20, AVG(payroll.base_salary) > 100000"
     ))
     ranking: Optional[RankingConfig] = Field(default=None, description="Advanced ranking configuration for window function or N-th rank queries")
+    window_function: Optional[WindowFunctionConfig] = Field(default=None, description="SQL window function configuration if required by the query")
     time_granularity: Optional[str] = Field(default=None, description=(
         "The time bucket granularity for grouping: 'day', 'week', 'month', 'quarter', 'year'. "
         "Set this when the planner specifies time-based grouping."

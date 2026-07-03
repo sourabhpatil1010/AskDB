@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from app.models import Base
 from app.ai.planner.planner_schema import (
-    ExecutionPlan, IntentEnum, Metric, Filter, HavingCondition, OrderCondition, PlannerClarificationException
+    ExecutionPlan, IntentEnum, Metric, Filter, HavingCondition, OrderCondition, WindowPlan, PlannerClarificationException
 )
 from app.ai.planner.planner_chain import PlannerChain
 from app.ai.planner.planner_validator import PlannerValidator
@@ -97,6 +97,15 @@ class AIQueryPlanner:
             group_col = ranking_info["group"]
             tables = ranking_info["tables"]
             
+            win_plan = WindowPlan(
+                requires_window=True,
+                function="DENSE_RANK" if ranking_info["nth_rank"] is not None else ("RANK" if "rank" in query.lower() else "ROW_NUMBER"),
+                partition_by=ranking_info["partition_by"],
+                order_by=[OrderCondition(field=sal_field, direction=dir_val)],
+                alias="rank_num",
+                ranking_type=ranking_info["ranking_type"]
+            )
+            
             return ExecutionPlan(
                 intent=IntentEnum.RANKING,
                 tables=tables,
@@ -115,6 +124,7 @@ class AIQueryPlanner:
                 limit_per_group=limit_val if ranking_info["scope"] == "per_group" else None,
                 nth_rank=ranking_info["nth_rank"],
                 requires_window_function=ranking_info["requires_window_function"],
+                window_plan=win_plan,
                 requires_partition_ranking=ranking_info["requires_partition_ranking"],
                 requires_correlated_subquery=ranking_info["requires_correlated_subquery"],
                 confidence=0.95
@@ -124,7 +134,7 @@ class AIQueryPlanner:
         intent = IntentEnum.FILTERING
         if any(w in q_lower for w in ["compare", "versus", "vs", "difference between"]):
             intent = IntentEnum.COMPARISON
-        elif any(w in q_lower for w in ["top", "bottom", "highest", "lowest", "rank", "best", "worst", "largest", "smallest", "first", "last", "earliest", "latest", "newest", "oldest", "nth", "performer", "earner"]):
+        elif any(re.search(r'\b' + re.escape(w) + r'\b', q_lower) for w in ["top", "bottom", "highest", "lowest", "rank", "best", "worst", "largest", "smallest", "first", "last", "earliest", "latest", "newest", "oldest", "nth", "performer", "earner"]):
             intent = IntentEnum.RANKING
         elif any(w in q_lower for w in ["growth", "trend", "yoy", "mom", "year over year", "over time"]):
             intent = IntentEnum.TREND_ANALYSIS
@@ -192,6 +202,18 @@ class AIQueryPlanner:
             sort_field = metrics[0].alias if metrics else "salary"
             order_by.append(OrderCondition(field=sort_field, direction="asc"))
 
+        win_plan = None
+        if intent == IntentEnum.RANKING:
+            r_type = "top" if order_by and order_by[0].direction == "desc" else "bottom"
+            win_plan = WindowPlan(
+                requires_window=True,
+                function="RANK" if "rank" in q_lower else "ROW_NUMBER",
+                partition_by=group_by if group_by else None,
+                order_by=order_by if order_by else None,
+                alias="rank_num",
+                ranking_type=r_type
+            )
+
         return ExecutionPlan(
             intent=intent,
             tables=detected_tables,
@@ -206,6 +228,8 @@ class AIQueryPlanner:
             ranking_type="top" if intent == IntentEnum.RANKING and order_by and order_by[0].direction == "desc" else ("bottom" if intent == IntentEnum.RANKING else None),
             rank=limit_val if intent == IntentEnum.RANKING else None,
             order=order_by[0].direction if order_by else None,
+            requires_window_function=(intent == IntentEnum.RANKING),
+            window_plan=win_plan,
             confidence=0.95
         )
 

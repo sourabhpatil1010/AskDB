@@ -1018,7 +1018,7 @@ class RankingSemanticUtils:
             "top", "bottom", "highest", "lowest", "best", "worst", "latest", "oldest", "newest", "first", "last",
             "performer", "earner", "rank", "most", "least", "maximum", "minimum", "largest", "smallest", "earliest", "nth"
         ]
-        has_ranking_word = any(w in q_lower for w in ranking_words) or any(w in q_lower for w in cls._ORDINAL_MAP.keys()) or re.search(r'\b\d+(?:st|nd|rd|th)\b', q_lower)
+        has_ranking_word = any(re.search(r'\b' + re.escape(w) + r'\b', q_lower) for w in ranking_words) or any(re.search(r'\b' + re.escape(w) + r'\b', q_lower) for w in cls._ORDINAL_MAP.keys()) or re.search(r'\b\d+(?:st|nd|rd|th)\b', q_lower)
         if not has_ranking_word:
             return None
 
@@ -1111,7 +1111,7 @@ class RankingSemanticUtils:
             "order": direction,
             "metric_field": metric_field,
             "tables": list(dict.fromkeys(detected_tables)),
-            "requires_window_function": (scope == "per_group" or ranking_type == "nth" or nth_rank is not None),
+            "requires_window_function": True,
             "requires_partition_ranking": (scope == "per_group"),
             "requires_correlated_subquery": (ranking_type == "nth" and scope == "global")
         }

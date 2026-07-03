@@ -314,7 +314,7 @@ class JSONGenerationChain:
         """Fallback deterministic conversion of ExecutionPlan to StructuredQuery when LLM is unavailable."""
         from app.ai.structured_output.schemas import (
             StructuredQuery, JoinCondition, FilterCondition, SortCondition,
-            RankingConfig, OperatorEnum, HavingCondition
+            RankingConfig, OperatorEnum, HavingCondition, WindowFunctionConfig
         )
         from app.ai.planner.planner_utils import JoinDetectionUtils, SchemaDateColumnResolver, SchemaJoinResolver
         from app.models import Base as _Base
@@ -408,6 +408,35 @@ class JSONGenerationChain:
                 dense_rank=(r_type == "nth")
             )
             
+        window_cfg = None
+        win_p = getattr(plan, "window_plan", None)
+        if win_p or is_ranking:
+            w_func = getattr(win_p, "function", None) if win_p else ("DENSE_RANK" if getattr(plan, "nth_rank", None) else ("RANK" if "rank" in str(getattr(plan, "intent", "")).lower() else "ROW_NUMBER"))
+            w_part_raw = getattr(win_p, "partition_by", None) if win_p else None
+            if w_part_raw:
+                from app.ai.planner.planner_utils import SchemaGroupingResolver
+                w_part = [SchemaGroupingResolver.resolve_grouping_column(p, plan.tables or [primary_table], default_table=primary_table) or p for p in w_part_raw]
+            else:
+                w_part = part_cols if is_ranking and part_cols else None
+            w_alias = getattr(win_p, "alias", None) if win_p else "rank_num"
+            w_order = None
+            if win_p and getattr(win_p, "order_by", None):
+                w_order = []
+                for o in win_p.order_by:
+                    fld = o.field
+                    if fld in ("salary", "salaries"): fld = "base_salary"
+                    o_tbl = SchemaColumnResolver.resolve_column_owner(fld, plan.tables or [primary_table]) or primary_table
+                    w_order.append(SortCondition(table=o_tbl, field=fld, direction=o.direction))
+            elif is_ranking and ranking_cfg and ranking_cfg.order_by:
+                w_order = [ranking_cfg.order_by]
+                
+            window_cfg = WindowFunctionConfig(
+                function=w_func or "ROW_NUMBER",
+                partition_by=w_part,
+                order_by=w_order,
+                alias=w_alias
+            )
+
         filters = []
         if plan.filters:
             for f in plan.filters:
@@ -468,6 +497,7 @@ class JSONGenerationChain:
             group_by=group_by if group_by else None,
             having=having_list if having_list else None,
             ranking=ranking_cfg,
+            window_function=window_cfg,
             time_granularity=time_gran,
             limit=plan.limit or 50
         )

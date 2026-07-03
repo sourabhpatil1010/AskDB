@@ -39,6 +39,17 @@ class OrderCondition(BaseModel):
     direction: str = Field(description="Sort direction: 'asc' or 'desc'")
 
 
+class WindowPlan(BaseModel):
+    """Generic window function planning metadata carried from AI Planner to JSON Generator."""
+    requires_window: bool = Field(default=True, description="True if a window function is required")
+    function: str = Field(default="ROW_NUMBER", description="Window function name: ROW_NUMBER, RANK, DENSE_RANK, etc.")
+    column: Optional[str] = Field(default=None, description="The target column or expression for analytical window functions")
+    partition_by: Optional[List[str]] = Field(default=None, description="List of columns or expressions to partition by")
+    order_by: Optional[List[OrderCondition]] = Field(default=None, description="Ordering rules within each partition")
+    alias: Optional[str] = Field(default="rank_num", description="Alias for the window function result column")
+    ranking_type: Optional[str] = Field(default=None, description="Type of ranking: top, bottom, nth")
+
+
 class ExecutionPlan(BaseModel):
     intent: Union[IntentEnum, str] = Field(description="The primary business intent of the query")
     tables: List[str] = Field(description="List of database tables required for this query")
@@ -63,6 +74,7 @@ class ExecutionPlan(BaseModel):
     limit_per_group: Optional[int] = Field(default=None, description="Limit per group for Top-N per group queries")
     nth_rank: Optional[int] = Field(default=None, description="Specific rank requested, e.g., 2 for second highest, 3 for third highest")
     requires_window_function: bool = Field(default=False, description="True if query requires SQL window functions (e.g., ROW_NUMBER, RANK)")
+    window_plan: Optional[WindowPlan] = Field(default=None, description="Window function planning metadata if the query requires a window function")
     requires_correlated_subquery: bool = Field(default=False, description="True if query requires correlated subqueries")
     requires_partition_ranking: bool = Field(default=False, description="True if query requires partition ranking across groups")
     decomposition: Optional[List[str]] = Field(default=None, description="Logical task-by-task breakdown of complex queries")
